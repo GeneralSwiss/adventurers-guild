@@ -28,11 +28,18 @@
 //!
 //! # Shape
 //!
-//! Each identifier wraps a `String` behind a private field and is built
-//! through [`FromStr`](std::str::FromStr), which rejects the empty string and
-//! any candidate carrying whitespace or control characters. Parsing at the
+//! Each identifier wraps a `String` behind a private field, and is built by
+//! `TryFrom<String>` — the sole constructor, which rejects the empty candidate
+//! and any candidate carrying whitespace or control characters. Parsing at the
 //! boundary means the rest of the domain never re-checks: holding an
 //! [`AdventurerId`] *is* the proof that it is well formed.
+//!
+//! [`FromStr`](std::str::FromStr) delegates to it, so `"quest-1".parse()` works
+//! too. The delegation runs that way around because a `&str` has to be copied
+//! before it can be owned: the borrowing impl can be written in terms of the
+//! owning one for the price of the copy it already owed, whereas the reverse
+//! would force an owned candidate through a needless second allocation. One
+//! constructor, and neither path copies more than it must.
 //!
 //! They are deliberately not `Copy`. A `String` cannot be, and the readable
 //! identifier was judged worth the `.clone()` at call sites — `quest-1` in a

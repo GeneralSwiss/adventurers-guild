@@ -27,27 +27,6 @@ impl QuestId {
     pub fn as_str(&self) -> &str {
         &self.0
     }
-
-    /// Rejects candidates that could not name a quest.
-    ///
-    /// Kept private and shared by [`FromStr`] and [`TryFrom<String>`] so the
-    /// rule lives in exactly one place, and so no caller can construct a
-    /// [`QuestId`] without passing through it.
-    fn validate(candidate: &str) -> Result<(), InvalidQuestId> {
-        if candidate.is_empty() {
-            return Err(InvalidQuestId::Empty);
-        }
-        match candidate
-            .chars()
-            .find(|c| c.is_whitespace() || c.is_control())
-        {
-            Some(found) => Err(InvalidQuestId::IllegalCharacter {
-                candidate: candidate.to_owned(),
-                found,
-            }),
-            None => Ok(()),
-        }
-    }
 }
 
 impl Display for QuestId {
@@ -56,31 +35,41 @@ impl Display for QuestId {
     }
 }
 
-impl FromStr for QuestId {
-    type Err = InvalidQuestId;
-
-    fn from_str(candidate: &str) -> Result<Self, Self::Err> {
-        Self::validate(candidate)?;
-        Ok(Self(candidate.to_owned()))
-    }
-}
-
 impl TryFrom<String> for QuestId {
     type Error = InvalidQuestId;
 
-    /// Moves the caller's buffer in rather than copying it.
+    /// Parses an owned candidate, moving its buffer into the result: into the
+    /// [`QuestId`] when the candidate is well formed, into the error when it is
+    /// not. Neither path copies.
     ///
-    /// Deliberately does not delegate to [`FromStr`] or `candidate.parse()`.
-    /// `from_str` takes a `&str` and so must `to_owned` it; routing through it
-    /// would allocate a second buffer and drop the one the caller already
-    /// owns. Skipping that copy is the *only* thing this impl offers over
-    /// `candidate.parse()` — were the copy acceptable, the right move would be
-    /// to delete this impl, not to delegate from it.
+    /// This is the only place a [`QuestId`] is constructed, so it is the
+    /// only place the rule can be enforced or bypassed. [`FromStr`] delegates
+    /// here rather than the reverse, because a `&str` must be copied before it
+    /// can be owned — the borrowing impl is the one that can be written in
+    /// terms of the owning impl without waste.
     ///
-    /// `should_reuse_the_callers_buffer` holds that claim to account.
+    /// `should_reuse_the_callers_buffer` holds the no-copy claim to account.
     fn try_from(candidate: String) -> Result<Self, Self::Error> {
-        Self::validate(&candidate)?;
-        Ok(Self(candidate))
+        if candidate.is_empty() {
+            return Err(InvalidQuestId::Empty);
+        }
+        match candidate
+            .chars()
+            .find(|c| c.is_whitespace() || c.is_control())
+        {
+            Some(found) => Err(InvalidQuestId::IllegalCharacter { candidate, found }),
+            None => Ok(Self(candidate)),
+        }
+    }
+}
+
+impl FromStr for QuestId {
+    type Err = InvalidQuestId;
+
+    /// Takes the copy a borrowed candidate requires, then defers to
+    /// [`TryFrom<String>`] for the rule.
+    fn from_str(candidate: &str) -> Result<Self, Self::Err> {
+        Self::try_from(candidate.to_owned())
     }
 }
 
