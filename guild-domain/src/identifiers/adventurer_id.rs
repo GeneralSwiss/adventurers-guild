@@ -1,0 +1,167 @@
+//! The identifier of an adventurer enrolled with the Guild.
+
+use std::fmt::{self, Display, Formatter};
+use std::str::FromStr;
+
+/// Identifies an adventurer enrolled with the Guild.
+///
+/// Constructed only by parsing, so holding one is proof that the text inside
+/// is well formed: non-empty, and free of whitespace and control characters.
+///
+/// Not interchangeable with any other identifier in this module — see the
+/// [module documentation](crate::identifiers) for the compile-time proof.
+///
+/// ```
+/// use guild_domain::identifiers::AdventurerId;
+///
+/// let id: AdventurerId = "adventurer-1".parse()?;
+/// assert_eq!(id.to_string(), "adventurer-1");
+/// # Ok::<(), guild_domain::identifiers::InvalidAdventurerId>(())
+/// ```
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct AdventurerId(String);
+
+impl AdventurerId {
+    /// Borrows the identifier as a string slice.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Rejects candidates that could not name an adventurer.
+    ///
+    /// Kept private and shared by [`FromStr`] and [`TryFrom<String>`] so the
+    /// rule lives in exactly one place, and so no caller can construct an
+    /// [`AdventurerId`] without passing through it.
+    fn validate(candidate: &str) -> Result<(), InvalidAdventurerId> {
+        if candidate.is_empty() {
+            return Err(InvalidAdventurerId::Empty);
+        }
+        match candidate
+            .chars()
+            .find(|c| c.is_whitespace() || c.is_control())
+        {
+            Some(found) => Err(InvalidAdventurerId::IllegalCharacter {
+                candidate: candidate.to_owned(),
+                found,
+            }),
+            None => Ok(()),
+        }
+    }
+}
+
+impl Display for AdventurerId {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        Display::fmt(&self.0, f)
+    }
+}
+
+impl FromStr for AdventurerId {
+    type Err = InvalidAdventurerId;
+
+    fn from_str(candidate: &str) -> Result<Self, Self::Err> {
+        Self::validate(candidate)?;
+        Ok(Self(candidate.to_owned()))
+    }
+}
+
+impl TryFrom<String> for AdventurerId {
+    type Error = InvalidAdventurerId;
+
+    /// Takes ownership of an already-owned candidate rather than copying it,
+    /// which [`FromStr`] cannot do.
+    fn try_from(candidate: String) -> Result<Self, Self::Error> {
+        Self::validate(&candidate)?;
+        Ok(Self(candidate))
+    }
+}
+
+/// The ways a candidate can fail to be an [`AdventurerId`].
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum InvalidAdventurerId {
+    /// The candidate held no characters at all.
+    #[error("an adventurer id must not be empty")]
+    Empty,
+    /// The candidate held a character an identifier may not carry.
+    #[error(
+        "an adventurer id must not contain whitespace or control characters, but {candidate:?} contains {found:?}"
+    )]
+    IllegalCharacter {
+        /// The rejected candidate, echoed back to locate the offending input.
+        candidate: String,
+        /// The first character that failed the rule.
+        found: char,
+    },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    #[test]
+    fn should_display_a_well_formed_candidate_unchanged() {
+        let id = AdventurerId::from_str("adventurer-1").expect("a well-formed id");
+
+        assert_eq!(id.to_string(), "adventurer-1");
+    }
+
+    #[test]
+    fn should_borrow_the_candidate_as_a_string_slice() {
+        let id = AdventurerId::from_str("adventurer-1").expect("a well-formed id");
+
+        assert_eq!(id.as_str(), "adventurer-1");
+    }
+
+    #[test]
+    fn should_reject_an_empty_candidate() {
+        assert_eq!(AdventurerId::from_str(""), Err(InvalidAdventurerId::Empty));
+    }
+
+    #[test]
+    fn should_reject_a_candidate_containing_whitespace() {
+        assert_eq!(
+            AdventurerId::from_str("two words"),
+            Err(InvalidAdventurerId::IllegalCharacter {
+                candidate: "two words".to_owned(),
+                found: ' ',
+            })
+        );
+    }
+
+    #[test]
+    fn should_reject_a_candidate_containing_a_control_character() {
+        assert_eq!(
+            AdventurerId::from_str("line\nbreak"),
+            Err(InvalidAdventurerId::IllegalCharacter {
+                candidate: "line\nbreak".to_owned(),
+                found: '\n',
+            })
+        );
+    }
+
+    #[test]
+    fn should_take_ownership_of_a_valid_owned_candidate() {
+        let id = AdventurerId::try_from("adventurer-1".to_owned()).expect("a well-formed id");
+
+        assert_eq!(id.as_str(), "adventurer-1");
+    }
+
+    #[test]
+    fn should_treat_identical_text_as_the_same_identifier() {
+        let first = AdventurerId::from_str("adventurer-1").expect("a well-formed id");
+        let second = AdventurerId::from_str("adventurer-1").expect("a well-formed id");
+        let mut seen: HashSet<AdventurerId> = HashSet::new();
+
+        assert!(seen.insert(first));
+        assert!(!seen.insert(second));
+    }
+
+    #[test]
+    fn should_order_identifiers_lexicographically() {
+        let first = AdventurerId::from_str("adventurer-1").expect("a well-formed id");
+        let second = AdventurerId::from_str("adventurer-2").expect("a well-formed id");
+
+        assert!(first < second);
+    }
+}
