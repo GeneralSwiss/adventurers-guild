@@ -1,0 +1,10 @@
+/target
+**/*.rs.bk
+*.pdb
+
+# Record of which issues seed-github.sh already created
+/backlog/.seeded
+
+# IDE
+/.idea
+/.vscode
