@@ -1,0 +1,7 @@
+# Production code is held to the `unwrap_used` / `expect_used` / `panic` bans
+# declared in Cargo.toml. Test code is not: a test that cannot construct its
+# own fixture *should* fail loudly and immediately, and threading `Result`
+# through every arrangement step buries the behaviour under ceremony.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-panic-in-tests = true
