@@ -68,8 +68,16 @@ impl FromStr for QuestId {
 impl TryFrom<String> for QuestId {
     type Error = InvalidQuestId;
 
-    /// Takes ownership of an already-owned candidate rather than copying it,
-    /// which [`FromStr`] cannot do.
+    /// Moves the caller's buffer in rather than copying it.
+    ///
+    /// Deliberately does not delegate to [`FromStr`] or `candidate.parse()`.
+    /// `from_str` takes a `&str` and so must `to_owned` it; routing through it
+    /// would allocate a second buffer and drop the one the caller already
+    /// owns. Skipping that copy is the *only* thing this impl offers over
+    /// `candidate.parse()` — were the copy acceptable, the right move would be
+    /// to delete this impl, not to delegate from it.
+    ///
+    /// `should_reuse_the_callers_buffer` holds that claim to account.
     fn try_from(candidate: String) -> Result<Self, Self::Error> {
         Self::validate(&candidate)?;
         Ok(Self(candidate))
@@ -141,10 +149,24 @@ mod tests {
     }
 
     #[test]
-    fn should_take_ownership_of_a_valid_owned_candidate() {
+    fn should_parse_an_owned_candidate() {
         let id = QuestId::try_from("quest-1".to_owned()).expect("a well-formed id");
 
         assert_eq!(id.as_str(), "quest-1");
+    }
+
+    #[test]
+    fn should_reuse_the_callers_buffer() {
+        // Asserts on the heap address on purpose. Not copying is the only
+        // reason `TryFrom<String>` earns its place beside `from_str`, so a
+        // later delegation to `from_str` has to fail here rather than pass
+        // quietly: `from_str` would allocate a fresh buffer for the copy.
+        let owned = String::from("quest-1");
+        let buffer = owned.as_ptr();
+
+        let id = QuestId::try_from(owned).expect("a well-formed id");
+
+        assert_eq!(id.as_str().as_ptr(), buffer);
     }
 
     #[test]
