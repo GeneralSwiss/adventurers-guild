@@ -30,4 +30,3 @@
 //! | `event`       | —         | Domain events emitted by the aggregates        |
 
 pub mod identifiers;
-pub mod coin;
