@@ -8,6 +8,7 @@ description = "The Adventurers' Guild contract, escrow, and settlement domain."
 
 [dependencies]
 thiserror.workspace = true
+num-rational.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true

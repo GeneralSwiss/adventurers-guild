@@ -20,8 +20,8 @@
 //!
 //! | Module        | Milestone | Holds                                          |
 //! |---------------|-----------|------------------------------------------------|
-//! | `identifiers` | M0        | Typed identifiers                              |
-//! | `money`       | M0        | `Coin`, `Share`, allocation without loss       |
+//! | [`identifiers`] | M0      | Typed identifiers                              |
+//! | [`money`]     | M0        | `Coin`, `Share`, allocation without loss       |
 //! | `time`        | M0        | `WorldInstant`, `Duration`                     |
 //! | `ledger`      | M1        | Double-entry postings that must balance        |
 //! | `quest`       | M2        | Bounty escrow and the quest lifecycle          |
@@ -29,6 +29,5 @@
 //! | `settlement`  | M4        | Fee schedules, split policies, payout          |
 //! | `event`       | —         | Domain events emitted by the aggregates        |
 
-pub mod allocation;
-pub mod coin;
 pub mod identifiers;
+pub mod money;
