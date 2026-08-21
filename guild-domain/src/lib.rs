@@ -29,5 +29,6 @@
 //! | `settlement`  | M4        | Fee schedules, split policies, payout          |
 //! | `event`       | —         | Domain events emitted by the aggregates        |
 
+pub mod allocation;
 pub mod coin;
 pub mod identifiers;
