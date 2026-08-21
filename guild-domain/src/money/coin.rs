@@ -7,7 +7,7 @@
 //! payout in this domain flows through this type.
 //!
 //! ```
-//! use guild_domain::coin::Coin;
+//! use guild_domain::money::Coin;
 //!
 //! let bounty = Coin::from_coppers(31_207);
 //! assert_eq!(bounty.to_string(), "3g 12s 7c");
@@ -68,13 +68,13 @@ use std::fmt::{self, Display, Formatter};
 /// type is [`Copy`], and money passes by value throughout the domain.
 ///
 /// ```
-/// use guild_domain::coin::Coin;
+/// use guild_domain::money::Coin;
 ///
 /// let purse = Coin::from_coppers(42);
 /// let spent = purse.checked_sub(Coin::from_coppers(12))?;
 ///
 /// assert_eq!(spent, Coin::from_coppers(30));
-/// # Ok::<(), guild_domain::coin::MoneyError>(())
+/// # Ok::<(), guild_domain::money::MoneyError>(())
 /// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub struct Coin(u64);
