@@ -1,0 +1,11 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc ff5befa0e7cc279d2c27e0415a62b3119096c9d474ad6cbab14e108823a755ee # shrinks to coppers_held = 0, weights = [1]
+cc 0357d75185a3ffb0843f5823ca86e01568a9da7e99009bb5d0c40366b4f9388b # shrinks to coppers_held = 0, weights = [1]
+cc 212ac919f0fbbe007025097cf2983d733539b1df583f0cef370ce2f98dde5dfa # shrinks to coppers_held = 0, weights = [1]
+cc 85b6b7330af455f1c4c48f010c9ac4a2a36c2e34c5647f59eae97fbc81d6bcea # shrinks to coppers_held = 0, weights = [1]
+cc 562dc3c485201bb116ff439db7cc9b120aeb3799e20967e2be27d40c33f5f922 # shrinks to coppers_held = 12220475382832203745, weights = [907, 253, 839, 64, 3, 274, 441, 422, 429, 619, 151, 684, 676, 441, 8, 431, 800, 557, 123]
