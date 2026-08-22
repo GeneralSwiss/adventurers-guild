@@ -1,13 +1,8 @@
 //! The Guild's chart of accounts: the buckets money sits in, and how it is
 //! classified.
 //!
-//! Quest, Party, and Escrow are the *story* — who agreed to what, who served
-//! which hours, who died. The ledger is the *record* — where every copper is,
-//! and how it got there. The two do not know about each other, and `settle()`
-//! is the only bridge: it reads the story and emits journal entries.
-//!
-//! This module is the noun list on the record side. [`Account`] names every
-//! bucket the Guild's books recognise, and the enum *is* the chart of
+//! This module is the noun list of the [record](super). [`Account`] names
+//! every bucket the Guild's books recognise, and the enum *is* the chart of
 //! accounts — an account nobody has enumerated here is a compile error rather
 //! than a typo that silently opens a new one.
 //!
@@ -43,18 +38,22 @@
 //!
 //! # Then where do "debit" and "credit" live?
 //!
-//! On `Posting`, as constructors of immutable facts rather than as mutators:
+//! On [`Posting`](super::Posting), as constructors of immutable facts rather
+//! than as mutators:
 //!
-//! ```ignore
-//! JournalEntry::new(
-//!     vec![
-//!         Posting::debit(Account::ClientEscrow(patron.clone()), Coin::from_coppers(400_000)),
-//!         Posting::credit(Account::GuildFeeIncome,              Coin::from_coppers(60_000)),
-//!         Posting::credit(Account::AdventurerPayable(thorne),   Coin::from_coppers(340_000)),
-//!     ],
-//!     "settlement of quest-1",
-//! )?
 //! ```
+//! use guild_domain::ledger::{Account, Posting};
+//! use guild_domain::money::Coin;
+//!
+//! let thorne = "bramblewick-thorne".parse()?;
+//!
+//! let fee = Posting::credit(Account::GuildFeeIncome, Coin::from_coppers(60_000))?;
+//! let share = Posting::credit(Account::AdventurerPayable(thorne), Coin::from_coppers(340_000))?;
+//! # Ok::<(), Box<dyn std::error::Error>>(())
+//! ```
+//!
+//! Gathering postings like those into an entry that refuses to exist unless
+//! they balance is the journal entry's job, not the account's.
 //!
 //! The money-tracking behaviour lives on the ledger because **the invariant is
 //! global**. "Debits equal credits", and "the trial balance is zero", span
@@ -104,6 +103,7 @@
 //! two different accounts holding one escrow's money, with nothing in the type
 //! stopping a posting from naming the wrong pair.
 
+use super::direction::Direction;
 use crate::identifiers::AdventurerId;
 
 /// What kind of thing an account is, in the accounting equation.
@@ -133,21 +133,6 @@ pub enum AccountKind {
     Income,
     /// What running the Guild costs. Nothing posts here yet.
     Expense,
-}
-
-/// Which side of an entry a posting falls on.
-///
-/// An enum rather than a sign, because `Debit` and `Credit` are domain words
-/// and a minus sign is not. This is the same call the [`money`](crate::money)
-/// module made when it chose an unsigned [`Coin`](crate::money::Coin): a purse
-/// cannot owe, so direction cannot be carried in the amount and has to be
-/// modelled where it belongs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AccountSide {
-    /// The left side. Increases assets and expenses.
-    Debit,
-    /// The right side. Increases liabilities, equity, and income.
-    Credit,
 }
 
 /// One bucket in the Guild's chart of accounts.
@@ -208,7 +193,7 @@ impl Account {
     /// compiler will say so.
     ///
     /// ```
-    /// use guild_domain::account::{Account, AccountKind};
+    /// use guild_domain::ledger::{Account, AccountKind};
     ///
     /// assert!(matches!(Account::GuildVault.kind(), AccountKind::Asset));
     /// assert!(matches!(Account::GuildFeeIncome.kind(), AccountKind::Income));
@@ -234,17 +219,15 @@ impl Account {
     /// than they earned, and that is nearly always a bug rather than a fact.
     ///
     /// ```
-    /// use guild_domain::account::{Account, AccountSide};
+    /// use guild_domain::ledger::{Account, Direction};
     ///
-    /// assert!(matches!(Account::GuildVault.normal_side(), AccountSide::Debit));
-    /// assert!(matches!(Account::GuildFeeIncome.normal_side(), AccountSide::Credit));
+    /// assert!(matches!(Account::GuildVault.normal_side(), Direction::Debit));
+    /// assert!(matches!(Account::GuildFeeIncome.normal_side(), Direction::Credit));
     /// ```
-    pub fn normal_side(&self) -> AccountSide {
+    pub fn normal_side(&self) -> Direction {
         match self.kind() {
-            AccountKind::Asset | AccountKind::Expense => AccountSide::Debit,
-            AccountKind::Liability | AccountKind::Equity | AccountKind::Income => {
-                AccountSide::Credit
-            }
+            AccountKind::Asset | AccountKind::Expense => Direction::Debit,
+            AccountKind::Liability | AccountKind::Equity | AccountKind::Income => Direction::Credit,
         }
     }
 }
@@ -289,9 +272,9 @@ mod tests {
     fn should_grow_what_the_guild_owes_and_earns_on_the_credit_side() {
         assert_eq!(
             Account::AdventurerPayable(adventurer("mirren-vale")).normal_side(),
-            AccountSide::Credit
+            Direction::Credit
         );
-        assert_eq!(Account::GuildFeeIncome.normal_side(), AccountSide::Credit);
+        assert_eq!(Account::GuildFeeIncome.normal_side(), Direction::Credit);
     }
 
     #[test]
@@ -300,7 +283,7 @@ mod tests {
         // account here is credit-normal, so without an asset the funding entry
         // — debit the vault, credit the escrow — has nothing to debit, and the
         // escrow spends its life in an abnormal balance.
-        assert_eq!(Account::GuildVault.normal_side(), AccountSide::Debit);
+        assert_eq!(Account::GuildVault.normal_side(), Direction::Debit);
     }
 
     #[test]
