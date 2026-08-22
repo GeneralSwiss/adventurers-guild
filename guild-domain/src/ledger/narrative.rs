@@ -63,7 +63,32 @@ impl Narrative {
         &self.0
     }
 
-    /// Attaches the `original` entry's identifier to the narrative, so a reversal can be read as "this is the reversal of that entry".
+    /// Marks the narrative as undoing the entry `original` names, so a
+    /// journal dump reads as prose.
+    ///
+    /// Applied by [`NormalEntry::reverse`](super::journal_entry::NormalEntry::reverse)
+    /// to the reason its caller gave, which is why nothing else needs to
+    /// remember to. The reversal records the same id as a field; this is the
+    /// half a person reads, and both come from the one argument, so they
+    /// cannot drift.
+    ///
+    /// Consumes and rebuilds rather than parsing, and is the only constructor
+    /// that does. It needs no check: a non-blank narrative with something
+    /// prefixed to it is still non-blank, still trimmed, and still says
+    /// something.
+    ///
+    /// ```
+    /// use guild_domain::identifiers::EntryId;
+    /// use guild_domain::ledger::Narrative;
+    ///
+    /// let reason: Narrative = "quest-1 never began".parse()?;
+    ///
+    /// assert_eq!(
+    ///     reason.reversal_of(EntryId::sequential(1)).as_str(),
+    ///     "reversal of entry-1: quest-1 never began",
+    /// );
+    /// # Ok::<(), guild_domain::ledger::InvalidNarrative>(())
+    /// ```
     #[must_use]
     pub fn reversal_of(self, original: crate::identifiers::EntryId) -> Self {
         let reversed = format!("reversal of {}: {}", original, self.0);
@@ -181,6 +206,15 @@ mod tests {
         let narrative = Narrative::from_str("estate payout: alder quill").expect("a narrative");
 
         assert_eq!(narrative.as_str(), "estate payout: alder quill");
+    }
+
+    #[test]
+    fn should_display_the_narrative_it_holds() {
+        // What a journal dump prints. Trimmed, because that is what was
+        // stored — `Display` shows the narrative, it does not reformat it.
+        let narrative = Narrative::from_str("  refund of quest-2  ").expect("a narrative");
+
+        assert_eq!(narrative.to_string(), "refund of quest-2");
     }
 
     #[test]

@@ -123,6 +123,26 @@ impl Posting {
         })
     }
 
+    /// The posting that undoes this one: same account, same amount, the
+    /// other direction.
+    ///
+    /// Infallible, and the one construction that does not go through
+    /// [`new`](Self::new) — it needs no rule, because a posting that already
+    /// moves something still moves it when it is turned around. Reversing
+    /// twice gives back the original.
+    ///
+    /// ```
+    /// use guild_domain::ledger::{Account, Direction, Posting};
+    /// use guild_domain::money::Coin;
+    ///
+    /// let funding = Posting::debit(Account::GuildVault, Coin::from_coppers(400_000))?;
+    /// let undone = funding.reverse();
+    ///
+    /// assert_eq!(undone.direction(), Direction::Credit);
+    /// assert_eq!(undone.amount(), funding.amount());
+    /// # Ok::<(), guild_domain::ledger::PostingError>(())
+    /// ```
+    #[must_use]
     pub fn reverse(&self) -> Self {
         let reversed_direction = match self.direction {
             Direction::Debit => Direction::Credit,
