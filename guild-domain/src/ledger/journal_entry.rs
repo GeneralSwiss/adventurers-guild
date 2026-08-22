@@ -55,6 +55,31 @@
 //! one debit against four credits. Nothing requires the two sides to have the
 //! same number of postings, only the same sum.
 //!
+//! # Corrections are entries too
+//!
+//! A mistaken entry is never edited. It is undone by
+//! [`NormalEntry::reverse`], which mirrors every posting into the opposite
+//! direction, so the correction balances for the same reason the original did
+//! — the two sides are the original's, swapped whole. Nothing re-checks it,
+//! and nothing needs to.
+//!
+//! The two kinds of entry are separate types rather than a flag, because the
+//! interesting rule is about what you may *do* with one. `reverse` lives on
+//! [`NormalEntry`], so "a reversal cannot itself be reversed" is not a runtime
+//! check the ledger has to remember — it is a method that a [`ReversalEntry`]
+//! simply does not have. Making impossible states unrepresentable, applied to
+//! an operation rather than to data.
+//! <https://lexi-lambda.github.io/blog/2019/11/05/parse-don-t-validate/>
+//!
+//! [`JournalEntry`] is the sum of the two, so a journal can hold both in one
+//! sequence, and matching on it is how a caller finds out which it has.
+//!
+//! A reversal records the [`EntryId`] it undoes, which is what lets the ledger
+//! answer "has this been corrected already?" — see [`JournalEntry::reverses`]
+//! and [`Ledger::reversal_of`](super::journal::Ledger::reversal_of). Its
+//! narrative is marked with that id as well, so the same fact reads correctly
+//! in a journal dump; both come from the one argument, so they cannot drift.
+//!
 //! # Where the money can run out
 //!
 //! [`Coin`] is a `u64` count of coppers, so summing a side can in principle
@@ -62,33 +87,61 @@
 //! [`LedgerError::SideOverflowed`] rather than wrapped: a ledger that silently
 //! rolls over is worse than one that stops.
 
-use std::iter::Rev;
-
 use super::direction::Direction;
 use super::narrative::Narrative;
 use super::posting::Posting;
+use crate::identifiers::EntryId;
 use crate::money::{Coin, MoneyError};
 
+/// An entry recording something that happened, rather than undoing it.
+///
+/// What [`JournalEntry::new`] builds, and the only kind that can be reversed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NormalEntry {
     postings: Vec<Posting>,
     narrative: Narrative,
 }
 
+/// An entry that undoes another, and says which.
+///
+/// Built only by [`NormalEntry::reverse`], so it cannot exist without naming
+/// the entry it corrects, and cannot be built from a reversal. It has no
+/// `reverse` of its own: undoing an undoing is written by posting the
+/// original again under its own narrative, which reads honestly, rather than
+/// by cancelling a correction the books have already recorded.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReversalEntry {
+    original: EntryId,
     postings: Vec<Posting>,
     narrative: Narrative,
 }
 
 impl NormalEntry {
-    pub fn reverse(&self, narrative: Narrative) -> ReversalEntry {
+    /// Mirrors this entry into one that undoes it.
+    ///
+    /// Every posting keeps its account and its amount and changes only its
+    /// direction, so the reversal's debits are this entry's credits and the
+    /// other way about. It therefore balances by construction — which is why
+    /// this is infallible where [`JournalEntry::new`] is not: there is no
+    /// arrangement of a balanced entry that mirrors into an unbalanced one.
+    ///
+    /// `original` is the id the ledger minted for this entry. It is recorded
+    /// on the reversal and prefixed to `narrative`, so the correction can be
+    /// tied to what it corrects by a query and by a reader.
+    ///
+    /// `narrative` is the caller's reason for correcting — a quest abandoned,
+    /// an amount keyed wrong — not the original's. That reason is the part a
+    /// reader cannot reconstruct from the postings.
+    #[must_use]
+    pub fn reverse(&self, original: EntryId, narrative: Narrative) -> ReversalEntry {
         let postings = self
             .postings
             .iter()
             .map(|posting| posting.reverse())
             .collect();
+        let narrative = narrative.reversal_of(original.clone());
         ReversalEntry {
+            original,
             postings,
             narrative,
         }
@@ -98,7 +151,9 @@ impl NormalEntry {
 /// A balanced set of postings, and what they were for.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum JournalEntry {
+    /// An entry recording something that happened.
     Normal(NormalEntry),
+    /// An entry undoing one that came before it.
     Reverse(ReversalEntry),
 }
 
@@ -148,10 +203,11 @@ impl JournalEntry {
             return Err(LedgerError::Unbalanced { debits, credits });
         }
 
-        Ok(Self::Normal(NormalEntry {
+        Ok(NormalEntry {
             postings,
             narrative,
-        }))
+        }
+        .into())
     }
 
     /// Sums one side of the entry.
@@ -170,6 +226,15 @@ impl JournalEntry {
         match self {
             Self::Normal(normal) => &normal.postings,
             Self::Reverse(reversed) => &reversed.postings,
+        }
+    }
+
+    /// The entry this one undoes, or `None` if it undoes nothing.
+    #[must_use]
+    pub fn reverses(&self) -> Option<&EntryId> {
+        match self {
+            Self::Normal(_) => None,
+            Self::Reverse(reversal) => Some(&reversal.original),
         }
     }
 
@@ -223,20 +288,29 @@ pub enum LedgerError {
         source: MoneyError,
     },
     /// The entry `id` names was not found in the ledger.
-    #[error("the entry {id:?} was not found in the ledger")]
+    #[error("the entry {id} was not found in the ledger")]
     EntryNotFound {
         /// The entry that was looked for.
-        id: crate::identifiers::EntryId,
+        id: EntryId,
     },
     /// The entry was already a reversal, so it cannot be reversed again.
-    #[error("the entry {0:?} was already a reversal, so it cannot be reversed again")]
-    UnableToReverse(crate::identifiers::EntryId),
+    #[error("the entry {0} was already a reversal, so it cannot be reversed again")]
+    UnableToReverse(EntryId),
+    /// The entry has a reversal already, and a second would undo it twice.
+    #[error("the entry {original} was already reversed by {reversal}")]
+    AlreadyReversed {
+        /// The entry the caller asked to reverse.
+        original: EntryId,
+        /// The reversal that already undoes it.
+        reversal: EntryId,
+    },
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::identifiers::AdventurerId;
+    use crate::identifiers::EntryId;
     use crate::ledger::Account;
     use proptest::prelude::*;
 
@@ -400,6 +474,26 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn should_record_the_entry_a_reversal_undoes() {
+        // The acceptance criterion that makes a reversal more than a second
+        // entry that happens to cancel: the journal can be asked what this
+        // one corrects, without parsing prose out of the narrative.
+        let entry = funding();
+
+        let reversal: JournalEntry = normal(&entry)
+            .reverse(EntryId::sequential(1), correction())
+            .into();
+
+        assert_eq!(reversal.reverses(), Some(&EntryId::sequential(1)));
+    }
+
+    #[test]
+    fn should_record_nothing_for_an_entry_that_undoes_nothing() {
+        // A normal entry corrects nothing, and says so.
+        assert_eq!(funding().reverses(), None);
+    }
+
     proptest! {
         /// Whatever shape a balanced entry arrives in, it is accepted.
         ///
@@ -470,7 +564,9 @@ mod tests {
         // shuffles its lines is harder to set against the entry it undoes.
         let entry = funding();
 
-        let reversal: JournalEntry = normal(&entry).reverse(correction()).into();
+        let reversal: JournalEntry = normal(&entry)
+            .reverse(EntryId::sequential(1), correction())
+            .into();
 
         assert_eq!(
             reversal.postings(),
@@ -497,7 +593,9 @@ mod tests {
         )
         .expect("a balanced entry");
 
-        let reversal: JournalEntry = normal(&entry).reverse(correction()).into();
+        let reversal: JournalEntry = normal(&entry)
+            .reverse(EntryId::sequential(1), correction())
+            .into();
 
         assert_eq!(
             reversal.postings(),
@@ -510,15 +608,21 @@ mod tests {
     }
 
     #[test]
-    fn should_take_the_narrative_the_reversal_was_given() {
-        // Not the original's. A reversal is written for its own reason — a
-        // quest abandoned, an amount keyed wrong — and that reason is what a
-        // reader needs.
+    fn should_mark_the_narrative_with_the_entry_the_reversal_undoes() {
+        // The caller's reason is kept — a reversal is written for its own
+        // reason, and that is what a reader needs — but it is prefixed with
+        // the entry being undone, so a journal dump reads as prose without
+        // anyone having to cross-reference ids by hand.
         let entry = funding();
 
-        let reversal: JournalEntry = normal(&entry).reverse(correction()).into();
+        let reversal: JournalEntry = normal(&entry)
+            .reverse(EntryId::sequential(1), correction())
+            .into();
 
-        assert_eq!(reversal.narrative(), &correction());
+        assert_eq!(
+            reversal.narrative().as_str(),
+            "reversal of entry-1: correction of quest-1"
+        );
     }
 
     #[test]
@@ -527,7 +631,9 @@ mod tests {
         // refuse to reverse a reversal without keeping a flag of its own.
         let entry = funding();
 
-        let reversal: JournalEntry = normal(&entry).reverse(correction()).into();
+        let reversal: JournalEntry = normal(&entry)
+            .reverse(EntryId::sequential(1), correction())
+            .into();
 
         assert!(matches!(reversal, JournalEntry::Reverse(_)));
     }
@@ -537,7 +643,7 @@ mod tests {
         // `reverse` borrows. Corrections are written, never applied in place.
         let entry = funding();
 
-        let _ = normal(&entry).reverse(correction());
+        let _ = normal(&entry).reverse(EntryId::sequential(1), correction());
 
         assert_eq!(entry, funding());
     }
@@ -548,12 +654,17 @@ mod tests {
         // disagree — reaching into the wrong field, or handing back the
         // original's narrative for a reversal.
         let entry = funding();
-        let reversal: JournalEntry = normal(&entry).reverse(correction()).into();
+        let reversal: JournalEntry = normal(&entry)
+            .reverse(EntryId::sequential(1), correction())
+            .into();
 
         assert_eq!(entry.postings().len(), 2);
         assert_eq!(entry.narrative(), &narrative());
         assert_eq!(reversal.postings().len(), 2);
-        assert_eq!(reversal.narrative(), &correction());
+        assert_eq!(
+            reversal.narrative().as_str(),
+            "reversal of entry-1: correction of quest-1"
+        );
     }
 
     proptest! {
@@ -582,7 +693,7 @@ mod tests {
             );
             let entry = JournalEntry::new(postings, narrative()).expect("a balanced entry");
 
-            let reversal: JournalEntry = normal(&entry).reverse(correction()).into();
+            let reversal: JournalEntry = normal(&entry).reverse(EntryId::sequential(1), correction()).into();
 
             let (debits, credits) = sides(&entry);
             prop_assert_eq!(sides(&reversal), (credits, debits));

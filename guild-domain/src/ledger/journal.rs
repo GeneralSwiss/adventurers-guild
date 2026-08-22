@@ -41,6 +41,24 @@
 //! past moment, which is unanswerable if history can be rewritten. Both of
 //! those are cheap here and would be impossible over a mutable store.
 //!
+//! # Correcting what is already written
+//!
+//! [`Ledger::reverse`] is the only correction there is. It appends an entry
+//! mirroring the mistaken one, so the accounts come back to where they were
+//! while both entries stay readable — the mistake and the admission of it.
+//!
+//! Two things are refused. A reversal cannot be reversed, which the type
+//! system settles rather than the ledger: `reverse` is a method on
+//! [`NormalEntry`](super::journal_entry::NormalEntry), and a reversal is not
+//! one. And an entry cannot be reversed twice, which the ledger does have to
+//! check, by looking for an existing correction with
+//! [`Ledger::reversal_of`] — a second reversal would carry the accounts past
+//! where they started, which is a worse state than the mistake.
+//!
+//! That check reads the journal instead of marking the entry it reverses.
+//! Marking would mean editing something already written, which is the one
+//! thing this module does not do, and it would put the truth in two places.
+//!
 //! # A balance is a fold, not a field
 //!
 //! [`Ledger::balance`] walks every posting naming an account and nets them.
@@ -64,9 +82,9 @@ use super::account::Account;
 use super::balance::Balance;
 use super::direction::Direction;
 use super::journal_entry::{JournalEntry, LedgerError};
+use super::narrative::Narrative;
 use super::posting::Posting;
 use crate::identifiers::EntryId;
-use crate::ledger::narrative;
 use crate::money::Coin;
 use std::collections::HashSet;
 
@@ -115,22 +133,86 @@ impl Ledger {
         id
     }
 
-    /// Reverses the entry `original` names, and appends the reversal.
+    /// Undoes the entry `original` names by appending its mirror image, and
+    /// names the entry that does the undoing.
+    ///
+    /// A correction never edits. The mistaken entry stays exactly where it
+    /// was, and a second entry mirroring every posting is written after it, so
+    /// the books show both what was said and that it was taken back.
+    ///
+    /// # Errors
+    ///
+    /// - [`LedgerError::EntryNotFound`] if nothing in the journal answers to
+    ///   `original`.
+    /// - [`LedgerError::UnableToReverse`] if `original` names a reversal.
+    ///   Undoing an undoing would say "the first entry stands after all",
+    ///   which is written by posting that entry again, under its own
+    ///   narrative, rather than by cancelling a correction the books have
+    ///   already recorded.
+    /// - [`LedgerError::AlreadyReversed`] if `original` has been reversed
+    ///   before, naming the reversal that already exists. A second one would
+    ///   carry the accounts past where they started.
+    ///
+    /// ```
+    /// use guild_domain::ledger::{Account, Balance, JournalEntry, Ledger, Posting};
+    /// use guild_domain::money::Coin;
+    ///
+    /// let patron = "lord-bramble".parse()?;
+    /// let mut ledger = Ledger::new();
+    ///
+    /// let funded = ledger.post(JournalEntry::new(
+    ///     vec![
+    ///         Posting::debit(Account::GuildVault, Coin::from_coppers(400_000))?,
+    ///         Posting::credit(Account::ClientEscrow(patron), Coin::from_coppers(400_000))?,
+    ///     ],
+    ///     "quest-1 funded".parse()?,
+    /// )?);
+    ///
+    /// let undone = ledger.reverse(funded.clone(), "quest-1 never began".parse()?)?;
+    ///
+    /// // The vault is back where it started, and both entries are still there.
+    /// assert_eq!(ledger.balance(&Account::GuildVault)?, Balance::Nil);
+    /// assert_eq!(ledger.len(), 2);
+    /// assert_eq!(ledger.entry(&undone).and_then(JournalEntry::reverses), Some(&funded));
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
     pub fn reverse(
         &mut self,
         original: EntryId,
-        narrative: narrative::Narrative,
+        narrative: Narrative,
     ) -> Result<EntryId, LedgerError> {
         let entry = self.entry(&original).ok_or(LedgerError::EntryNotFound {
             id: original.clone(),
         })?;
-        match entry {
-            JournalEntry::Normal(normal) => {
-                let reversed: JournalEntry = normal.reverse(narrative).into();
-                Ok(self.post(reversed))
-            }
-            JournalEntry::Reverse(_) => Err(LedgerError::UnableToReverse(original)),
+        let JournalEntry::Normal(normal) = entry else {
+            return Err(LedgerError::UnableToReverse(original));
+        };
+        if let Some(reversal) = self.reversal_of(&original) {
+            return Err(LedgerError::AlreadyReversed {
+                original: original.clone(),
+                reversal: reversal.clone(),
+            });
         }
+        let reversal: JournalEntry = normal.reverse(original, narrative).into();
+        Ok(self.post(reversal))
+    }
+
+    /// Finds the entry that undoes the one `original` names, if one was
+    /// posted.
+    ///
+    /// The question [`reverse`](Self::reverse) asks before it agrees to write
+    /// a correction, and the one a caller asks to find out whether it still
+    /// needs to. Answered by reading the journal rather than by a flag on the
+    /// entry being reversed — the same argument the [account
+    /// module](super::account) makes about balances, and for the same reason:
+    /// a flag would be a second place the truth is kept, and an entry already
+    /// written is not there to be flagged.
+    #[must_use]
+    pub fn reversal_of(&self, original: &EntryId) -> Option<&EntryId> {
+        self.entries
+            .iter()
+            .find(|(_, entry)| entry.reverses() == Some(original))
+            .map(|(id, _)| id)
     }
 
     /// Finds the entry `id` names.
@@ -349,6 +431,52 @@ mod tests {
     }
 
     #[test]
+    fn should_restore_prior_balances_when_an_entry_is_reversed() {
+        // The acceptance criterion, stated as it is written: *prior*, not
+        // nil. The vault is carrying an earlier entry that the correction has
+        // no business touching, so a reversal that simply emptied the account
+        // would pass a nil assertion and still be wrong.
+        let mut ledger = Ledger::new();
+        ledger.post(funding(1_000));
+        let prior = ledger.balance(&Account::GuildVault);
+        let mistake = ledger.post(funding(400_000));
+
+        ledger
+            .reverse(mistake, correction())
+            .expect("a normal entry to reverse");
+
+        assert_eq!(ledger.balance(&Account::GuildVault), prior);
+        assert_eq!(
+            ledger.balance(&Account::GuildVault),
+            Ok(Balance::Debit(Coin::from_coppers(1_000)))
+        );
+    }
+
+    #[test]
+    fn should_find_the_reversal_that_undoes_an_entry() {
+        let mut ledger = Ledger::new();
+        let id = ledger.post(funding(400_000));
+
+        let reversal = ledger
+            .reverse(id.clone(), correction())
+            .expect("a normal entry to reverse");
+
+        assert_eq!(ledger.reversal_of(&id), Some(&reversal));
+    }
+
+    #[test]
+    fn should_find_no_reversal_for_an_entry_that_still_stands() {
+        // The other half of the question `reverse` asks itself. An entry that
+        // has not been corrected must not look corrected, or every reversal
+        // after the first one in the journal would be refused.
+        let mut ledger = Ledger::new();
+        let id = ledger.post(funding(400_000));
+        ledger.post(funding(1_000));
+
+        assert_eq!(ledger.reversal_of(&id), None);
+    }
+
+    #[test]
     fn should_leave_the_entry_it_reverses_in_the_journal() {
         // The append-only rule, at the one place there would be a temptation
         // to break it. Bitemporal queries in M1 ask what the books said at a
@@ -379,8 +507,10 @@ mod tests {
 
         assert_ne!(reversal, id);
         assert_eq!(
-            ledger.entry(&reversal).map(JournalEntry::narrative),
-            Some(&correction())
+            ledger
+                .entry(&reversal)
+                .map(|entry| entry.narrative().as_str()),
+            Some("reversal of entry-1: quest-1 abandoned")
         );
     }
 
@@ -394,6 +524,32 @@ mod tests {
             refused,
             Err(LedgerError::EntryNotFound {
                 id: EntryId::sequential(1)
+            })
+        );
+    }
+
+    #[test]
+    fn should_refuse_to_reverse_an_entry_that_was_already_reversed() {
+        // Twice undone is worse than not undone at all: the second reversal
+        // carries the accounts past where they started, and the journal ends
+        // up holding two corrections for one mistake.
+        //
+        // The error names the reversal that already exists, because the
+        // caller asking for this is one who has lost track of it — telling
+        // them only "no" leaves them no way to go and look.
+        let mut ledger = Ledger::new();
+        let id = ledger.post(funding(400_000));
+        let reversal = ledger
+            .reverse(id.clone(), correction())
+            .expect("a normal entry to reverse");
+
+        let refused = ledger.reverse(id.clone(), correction());
+
+        assert_eq!(
+            refused,
+            Err(LedgerError::AlreadyReversed {
+                original: id,
+                reversal
             })
         );
     }
