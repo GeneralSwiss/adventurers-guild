@@ -47,7 +47,10 @@ use guild_domain::identifiers::{
     AdventurerId, ContractId, EntryId, InvalidAdventurerId, InvalidContractId, InvalidEntryId,
     InvalidPartyId, InvalidQuestId, PartyId, QuestId,
 };
-use guild_domain::ledger::{Account, AccountKind, Direction, Posting, PostingError};
+use guild_domain::ledger::{
+    Account, AccountKind, Direction, InvalidNarrative, JournalEntry, LedgerError, Narrative,
+    Posting, PostingError,
+};
 use guild_domain::money::{Coin, InvalidShare, MoneyError, Share, Shares};
 use guild_domain::time::{Duration, TimeError, WorldInstant};
 
@@ -98,6 +101,10 @@ fn every_ledger_type_crosses_thread_boundaries() {
     assert_send_sync::<AccountKind>();
     assert_send_sync::<Direction>();
     assert_send_sync::<Posting>();
+    assert_send_sync::<Narrative>();
+    assert_send_sync::<JournalEntry>();
 
     assert_send_sync::<PostingError>();
+    assert_send_sync::<InvalidNarrative>();
+    assert_send_sync::<LedgerError>();
 }
