@@ -1,0 +1,3 @@
+[alias]
+# Local coverage with a browsable report: target/coverage/tarpaulin-report.html
+coverage = "tarpaulin --workspace --out Html --output-dir target/coverage"
