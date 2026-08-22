@@ -27,8 +27,10 @@
 
 pub mod account;
 pub mod direction;
+pub mod narrative;
 pub mod posting;
 
 pub use account::{Account, AccountKind};
 pub use direction::Direction;
+pub use narrative::{InvalidNarrative, Narrative};
 pub use posting::{Posting, PostingError};
