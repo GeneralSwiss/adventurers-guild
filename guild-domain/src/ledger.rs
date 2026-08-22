@@ -31,12 +31,14 @@
 //! over `ledger::account::Account`.
 
 pub mod account;
+pub mod balance;
 pub mod direction;
 pub mod journal_entry;
 pub mod narrative;
 pub mod posting;
 
 pub use account::{Account, AccountKind};
+pub use balance::Balance;
 pub use direction::Direction;
 pub use journal_entry::{JournalEntry, LedgerError};
 pub use narrative::{InvalidNarrative, Narrative};
