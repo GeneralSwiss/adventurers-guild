@@ -43,11 +43,11 @@
 //! uncovered until someone adds it here, and nothing but review catches the
 //! omission — the same trade, and the same exposure, accepted knowingly.
 
-use guild_domain::account::{Account, AccountKind, AccountSide};
 use guild_domain::identifiers::{
     AdventurerId, ContractId, EntryId, InvalidAdventurerId, InvalidContractId, InvalidEntryId,
     InvalidPartyId, InvalidQuestId, PartyId, QuestId,
 };
+use guild_domain::ledger::{Account, AccountKind, Direction, Posting, PostingError};
 use guild_domain::money::{Coin, InvalidShare, MoneyError, Share, Shares};
 use guild_domain::time::{Duration, TimeError, WorldInstant};
 
@@ -93,8 +93,11 @@ fn every_time_type_crosses_thread_boundaries() {
 }
 
 #[test]
-fn every_account_type_crosses_thread_boundaries() {
+fn every_ledger_type_crosses_thread_boundaries() {
     assert_send_sync::<Account>();
     assert_send_sync::<AccountKind>();
-    assert_send_sync::<AccountSide>();
+    assert_send_sync::<Direction>();
+    assert_send_sync::<Posting>();
+
+    assert_send_sync::<PostingError>();
 }
