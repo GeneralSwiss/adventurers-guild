@@ -36,3 +36,26 @@ jobs:
 
       - name: Tests
         run: cargo test
+
+  coverage:
+    name: coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install tarpaulin
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-tarpaulin
+
+      # Fails the build below the threshold. The domain layer is at 100% and
+      # the goal is to keep it there; the gate sits lower so that a single
+      # genuinely-unreachable line does not redden every PR. Raise it when
+      # that stops being a risk.
+      - name: Coverage
+        run: cargo tarpaulin --workspace --fail-under 95
