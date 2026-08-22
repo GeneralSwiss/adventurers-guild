@@ -11,7 +11,7 @@
 //! - Domain concepts get newtypes. A quest identifier is not a `String`.
 //! - Variants are enums, matched exhaustively — no `_` arms on domain enums,
 //!   so adding a variant becomes a compile error rather than a silent bug.
-//! - Time is a domain type, not `chrono`. See the `time` module when it lands.
+//! - Time is a domain type, not `chrono`. See [`time`].
 //!
 //! # Modules to come
 //!
@@ -22,7 +22,7 @@
 //! |---------------|-----------|------------------------------------------------|
 //! | [`identifiers`] | M0      | Typed identifiers                              |
 //! | [`money`]     | M0        | `Coin`, `Share`, allocation without loss       |
-//! | `time`        | M0        | `WorldInstant`, `Duration`                     |
+//! | [`time`]      | M0        | `WorldInstant`, `Duration`                     |
 //! | `ledger`      | M1        | Double-entry postings that must balance        |
 //! | `quest`       | M2        | Bounty escrow and the quest lifecycle          |
 //! | `party`       | M3        | Membership as intervals over time              |
