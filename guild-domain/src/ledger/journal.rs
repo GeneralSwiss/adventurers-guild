@@ -344,23 +344,113 @@ impl Ledger {
     /// it is a state the journal can genuinely reach rather than a theoretical
     /// one.
     pub fn balance(&self, account: &Account) -> Result<Balance, LedgerError> {
-        let debits = self.total(account, Direction::Debit)?;
-        let credits = self.total(account, Direction::Credit)?;
+        Self::netting(self.postings(), account)
+    }
+
+    /// Nets everything posted to `account` that had happened by `occurred`
+    /// and was known by `known`.
+    ///
+    /// The two questions a ledger with one timestamp cannot both answer. A
+    /// death on day 12 that the Guild hears of on day 21 is invisible to
+    /// `balance_as_of(.., day(12), day(12))` and present in
+    /// `balance_as_of(.., day(12), day(21))` — and both answers are correct,
+    /// because they are answers to different questions. The first is what the
+    /// books said at the time; the second is what we now say was true at the
+    /// time.
+    ///
+    /// Both bounds are inclusive, and both are needed: dropping `known`
+    /// rewrites history every time the Guild learns something, and dropping
+    /// `occurred` cannot tell a backdated correction from a fresh event.
+    ///
+    /// [`balance`](Self::balance) is this function asked at the far end of
+    /// both axes.
+    ///
+    /// # Errors
+    ///
+    /// [`LedgerError::SideOverflowed`], on the same terms as
+    /// [`balance`](Self::balance).
+    ///
+    /// ```
+    /// use guild_domain::ledger::{Account, Balance, JournalEntry, Ledger, Posting, Stamps};
+    /// use guild_domain::money::Coin;
+    /// use guild_domain::time::{Duration, WorldInstant};
+    ///
+    /// let day = |n: u64| WorldInstant::from_seconds_since_founding(n * Duration::SECONDS_PER_DAY);
+    /// let patron = "lord-bramble".parse()?;
+    /// let alder: guild_domain::identifiers::AdventurerId = "alder-quill".parse()?;
+    /// let estate = Account::EstatePayable(alder);
+    /// let mut ledger = Ledger::new();
+    ///
+    /// // Died on day 12. The Guild only heard on day 21.
+    /// ledger.post(
+    ///     JournalEntry::new(
+    ///         vec![
+    ///             Posting::debit(Account::ClientEscrow(patron), Coin::from_coppers(100_000))?,
+    ///             Posting::credit(estate.clone(), Coin::from_coppers(100_000))?,
+    ///         ],
+    ///         "death benefit for alder-quill".parse()?,
+    ///     )?,
+    ///     Stamps::new(day(12), day(21)),
+    /// )?;
+    ///
+    /// // What the books said on day 12, and what we now say was true then.
+    /// assert_eq!(ledger.balance_as_of(&estate, day(12), day(12))?, Balance::Nil);
+    /// assert_eq!(
+    ///     ledger.balance_as_of(&estate, day(12), day(21))?,
+    ///     Balance::Credit(Coin::from_coppers(100_000)),
+    /// );
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn balance_as_of(
+        &self,
+        account: &Account,
+        occurred: WorldInstant,
+        known: WorldInstant,
+    ) -> Result<Balance, LedgerError> {
+        Self::netting(self.postings_as_of(occurred, known), account)
+    }
+
+    /// Nets `postings` for one account, debits against credits.
+    fn netting<'a>(
+        postings: impl Iterator<Item = &'a Posting> + Clone,
+        account: &Account,
+    ) -> Result<Balance, LedgerError> {
+        let debits = Self::total(postings.clone(), account, Direction::Debit)?;
+        let credits = Self::total(postings, account, Direction::Credit)?;
         Ok(Balance::netting(debits, credits))
     }
 
-    /// Sums one side of one account across the whole journal.
-    fn total(&self, account: &Account, side: Direction) -> Result<Coin, LedgerError> {
-        self.postings()
+    /// Sums one side of one account.
+    fn total<'a>(
+        postings: impl Iterator<Item = &'a Posting>,
+        account: &Account,
+        side: Direction,
+    ) -> Result<Coin, LedgerError> {
+        postings
             .filter(|posting| posting.account() == account && posting.direction() == side)
             .try_fold(Coin::ZERO, |sum, posting| sum.checked_add(posting.amount()))
             .map_err(|source| LedgerError::SideOverflowed { side, source })
     }
 
     /// Every posting in the journal, in the order they were written.
-    fn postings(&self) -> impl Iterator<Item = &Posting> {
+    fn postings(&self) -> impl Iterator<Item = &Posting> + Clone {
         self.entries
             .iter()
+            .flat_map(|record| record.entry.postings())
+    }
+
+    /// Every posting that had happened by `occurred` and was known by
+    /// `known`, in the order they were written.
+    fn postings_as_of(
+        &self,
+        occurred: WorldInstant,
+        known: WorldInstant,
+    ) -> impl Iterator<Item = &Posting> + Clone {
+        self.entries
+            .iter()
+            .filter(move |record| {
+                record.stamps.occurred_at() <= occurred && record.stamps.recorded_at() <= known
+            })
             .flat_map(|record| record.entry.postings())
     }
 
@@ -772,6 +862,130 @@ mod tests {
         assert_eq!(
             ledger.balance(&Account::GuildVault),
             Ok(Balance::Debit(Coin::from_coppers(1_000)))
+        );
+    }
+
+    #[test]
+    fn should_ignore_entries_that_had_not_happened_yet() {
+        // The "what was true" axis on its own. Both entries are known by the
+        // time of the asking; only one of them had happened.
+        let mut ledger = Ledger::new();
+        ledger
+            .post(funding(400_000), Stamps::new(day(3), day(3)))
+            .expect("stamps that do not run backwards");
+        ledger
+            .post(funding(1_000), Stamps::new(day(20), day(20)))
+            .expect("stamps that do not run backwards");
+
+        let as_of_day_ten = ledger.balance_as_of(&Account::GuildVault, day(10), day(30));
+
+        assert_eq!(
+            as_of_day_ten,
+            Ok(Balance::Debit(Coin::from_coppers(400_000)))
+        );
+    }
+
+    #[test]
+    fn should_ignore_entries_the_guild_had_not_yet_learned_of() {
+        // The "what did we know" axis on its own. Both entries had happened
+        // by the moment being asked about; only one had been written down.
+        let mut ledger = Ledger::new();
+        ledger
+            .post(funding(400_000), Stamps::new(day(3), day(3)))
+            .expect("stamps that do not run backwards");
+        ledger
+            .post(funding(1_000), Stamps::new(day(4), day(20)))
+            .expect("stamps that do not run backwards");
+
+        let as_known_on_day_ten = ledger.balance_as_of(&Account::GuildVault, day(30), day(10));
+
+        assert_eq!(
+            as_known_on_day_ten,
+            Ok(Balance::Debit(Coin::from_coppers(400_000)))
+        );
+    }
+
+    #[test]
+    fn should_count_an_entry_on_the_very_moment_it_happened_and_was_learned() {
+        // Both bounds are inclusive. Asking "as of day 12" includes what
+        // happened on day 12 — a reader who has to remember an off-by-one
+        // will get it wrong, and a ledger is not the place for that.
+        let mut ledger = Ledger::new();
+        ledger
+            .post(funding(400_000), Stamps::new(day(12), day(21)))
+            .expect("stamps that do not run backwards");
+
+        assert_eq!(
+            ledger.balance_as_of(&Account::GuildVault, day(12), day(21)),
+            Ok(Balance::Debit(Coin::from_coppers(400_000)))
+        );
+        assert_eq!(
+            ledger.balance_as_of(&Account::GuildVault, day(11), day(21)),
+            Ok(Balance::Nil)
+        );
+        assert_eq!(
+            ledger.balance_as_of(&Account::GuildVault, day(12), day(20)),
+            Ok(Balance::Nil)
+        );
+    }
+
+    #[test]
+    fn should_agree_with_balance_when_asked_about_the_present() {
+        // The plain balance is the bitemporal one asked at the far end of
+        // both axes. If these two ever disagree, one of them is folding a
+        // different set of postings.
+        let mut ledger = Ledger::new();
+        ledger
+            .post(funding(400_000), Stamps::new(day(3), day(3)))
+            .expect("stamps that do not run backwards");
+        ledger
+            .post(funding(1_000), Stamps::new(day(12), day(21)))
+            .expect("stamps that do not run backwards");
+
+        let latest = WorldInstant::from_seconds_since_founding(u64::MAX);
+
+        assert_eq!(
+            ledger.balance_as_of(&Account::GuildVault, latest, latest),
+            ledger.balance(&Account::GuildVault)
+        );
+    }
+
+    #[test]
+    fn should_report_a_backdated_death_benefit_only_once_the_guild_knows_of_it() {
+        // The demo. A party marches on day 3 with 400,000 in escrow. An
+        // adventurer dies on day 12, but the news walks home at the speed of
+        // the survivors and does not arrive until day 21.
+        //
+        // Ask what the estate was owed on day 12 and the answer depends
+        // entirely on *when you ask from*. Both answers are correct. That is
+        // the whole point of keeping two clocks: "what was true" and "what did
+        // we know" are different questions, and a ledger with one timestamp
+        // can only answer one of them.
+        let alder = adventurer("alder-quill");
+        let estate = Account::EstatePayable(alder);
+        let mut ledger = Ledger::new();
+
+        ledger
+            .post(funding(400_000), Stamps::new(day(3), day(3)))
+            .expect("stamps that do not run backwards");
+        ledger
+            .post(
+                entry(vec![
+                    debit(patron(), 100_000),
+                    credit(estate.clone(), 100_000),
+                ]),
+                Stamps::new(day(12), day(21)),
+            )
+            .expect("stamps that do not run backwards");
+
+        let as_the_guild_knew_it_on_day_twelve = ledger.balance_as_of(&estate, day(12), day(12));
+        let as_the_guild_knows_it_on_day_twentyone =
+            ledger.balance_as_of(&estate, day(12), day(21));
+
+        assert_eq!(as_the_guild_knew_it_on_day_twelve, Ok(Balance::Nil));
+        assert_eq!(
+            as_the_guild_knows_it_on_day_twentyone,
+            Ok(Balance::Credit(Coin::from_coppers(100_000)))
         );
     }
 
