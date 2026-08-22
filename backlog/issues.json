@@ -1,0 +1,168 @@
+[
+  {
+    "title": "chore: CI running fmt, clippy, and tests",
+    "milestone": "M0 Foundations",
+    "labels": ["chore"],
+    "body": "**Why**\nEvery later issue closes on a green build. Establish the gate before writing domain code, so the first real type lands into a working pipeline.\n\nThe workspace, crate, and lint configuration already exist locally. This issue is the CI workflow only.\n\n**Acceptance**\n- [ ] `.github/workflows/ci.yml` runs on push and pull request\n- [ ] Three steps: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test`\n- [ ] The workflow passes against the empty crate before any domain code is written\n\n**Notes**\nWarnings are errors here on purpose. `missing_docs` is already `warn` at the crate level, so an undocumented public item will fail CI — that is the intent, not an obstacle to route around."
+  },
+  {
+    "title": "feat(ids): typed identifiers that cannot be swapped",
+    "milestone": "M0 Foundations",
+    "labels": ["domain", "value-object"],
+    "body": "**Why**\nStringly-typed identifiers are the first crack that lets a `PartyId` end up where a `QuestId` belongs. The compiler should refuse.\n\n**Acceptance**\n- [ ] `AdventurerId`, `QuestId`, `PartyId`, `ContractId`, `EntryId` exist as mutually incompatible types\n- [ ] Each has a private inner field, `Display`, `Debug`, `Clone`, `Copy`, `PartialEq`, `Eq`, `Hash`, and an ordering if useful\n- [ ] Passing a `QuestId` to a function expecting a `PartyId` does not compile\n\n**Write first**\nA test that constructs one of each and asserts they round-trip through `Display`.\n\n**Notes**\nTwo shapes worth weighing before you commit:\n\n1. A `macro_rules! id_type` generating each distinct struct — plainest to read in errors.\n2. `struct Id<T>(u128, PhantomData<T>)` with marker types — no macro, but `PhantomData` leaks into signatures and the derives need manual impls to avoid a spurious `T: Clone` bound.\n\nEither is defensible. Pick one and note why in the module docs.\n\nIf you want the negative case enforced rather than asserted in prose, `trybuild` turns \"must not compile\" into an actual test."
+  },
+  {
+    "title": "feat(money): Coin as integer minor units",
+    "milestone": "M0 Foundations",
+    "labels": ["domain", "value-object"],
+    "body": "**Why**\nMoney is the one place a float is unambiguously a bug. Every bounty, fee, and payout in this domain flows through this type.\n\n**Acceptance**\n- [ ] `Coin` wraps an integer count of coppers, field private\n- [ ] 1 silver = 12 coppers, 1 gold = 20 silver — fixed constants, no magic numbers at call sites\n- [ ] `checked_add` / `checked_sub` return `Result<Coin, MoneyError>`, never wrap or panic\n- [ ] Subtraction below zero is an error, not a negative purse — a purse cannot owe\n- [ ] `Display` renders `3g 12s 7c`, and omits empty denominations (`7c`, not `0g 0s 7c`)\n- [ ] `MoneyError` is a `thiserror` enum\n\n**Write first**\n```rust\n#[test]\nfn should_reject_subtracting_more_than_the_purse_holds() { /* ... */ }\n```\n\n**Notes**\nSigned or unsigned inner type is a real decision. Unsigned makes \"no negative purse\" free but makes ledger deltas awkward later; the ledger can carry direction separately (see the `Posting` issue). Decide here, document the reasoning, and do not revisit it in M1."
+  },
+  {
+    "title": "feat(money): allocate a purse without losing a copper",
+    "milestone": "M0 Foundations",
+    "labels": ["domain", "value-object", "proptest"],
+    "body": "**Why**\nSplitting 100c three ways is where naive money code quietly evaporates a copper. Settlement depends entirely on this being exact.\n\n**Acceptance**\n- [ ] `Coin::allocate(&self, weights: &[Share]) -> Vec<Coin>` distributes the whole purse\n- [ ] The remainder is handed out by largest-remainder, deterministically — same input, same output, every time\n- [ ] Property: for any purse and any 1..=20 weights, the parts sum **exactly** to the original\n- [ ] Property: no part is negative, and the count of parts equals the count of weights\n\n**Write first**\nThe proptest above. It should fail before `allocate` exists, and it is the test that stays valuable for the life of the project.\n\n**Further reading**\nFowler's Money pattern names this operation `allocate` for exactly this reason: https://martinfowler.com/eaaCatalog/money.html"
+  },
+  {
+    "title": "feat(money): Share as an exact ratio",
+    "milestone": "M0 Foundations",
+    "labels": ["domain", "value-object"],
+    "body": "**Why**\n`allocate` needs weights, and a weight expressed as `f64` reintroduces the rounding you just eliminated.\n\n**Acceptance**\n- [ ] `Share` holds an exact numerator and denominator, no floating point\n- [ ] A smart constructor rejects a zero denominator\n- [ ] `Shares::new(Vec<Share>)` — or equivalent — rejects a set that does not sum to exactly one\n- [ ] The error is typed and says what the set actually summed to\n\n**Write first**\n```rust\n#[test]\nfn should_reject_shares_that_do_not_sum_to_one() { /* thirds that sum to 0.999 */ }\n```\n\n**Notes**\nThis is parse-don't-validate applied to weights: once you hold a `Shares`, the sum-to-one property is guaranteed and `allocate` never has to re-check it. https://lexi-lambda.github.io/blog/2019/11/05/parse-don-t-validate/"
+  },
+  {
+    "title": "feat(time): WorldInstant and Duration",
+    "milestone": "M0 Foundations",
+    "labels": ["domain", "value-object"],
+    "body": "**Why**\nParty membership, bitemporal ledger stamps, and time-weighted splits all need time. The domain layer owning its own time type is what keeps `chrono` out of the core.\n\n**Acceptance**\n- [ ] `WorldInstant` is a newtype over an offset from a fixed epoch (pick one and name it in the docs — a founding date of the Guild works nicely)\n- [ ] `Duration` is a separate type; `WorldInstant - WorldInstant = Duration` and `WorldInstant + Duration = WorldInstant`\n- [ ] `Ord` on `WorldInstant`, so intervals can be compared\n- [ ] Adding two instants together does not compile — that operation is meaningless\n- [ ] No `chrono` or `time` crate in `[dependencies]`\n\n**Notes**\nConversion to and from a real calendar belongs in an adapter, not here. When the TUI eventually needs to print a date, that is a `From` impl living outside this crate."
+  },
+
+  {
+    "title": "feat(ledger): the Account sum type",
+    "milestone": "M1 Ledger",
+    "labels": ["domain", "value-object"],
+    "body": "**Why**\nEvery posting names an account. Making the chart of accounts an enum means an unknown account is a compile error rather than a typo that silently creates one.\n\n**Acceptance**\n- [ ] `Account` covers at least `ClientEscrow(ClientId)`, `AdventurerPayable(AdventurerId)`, `EstatePayable(AdventurerId)`, `GuildFeeIncome`\n- [ ] Each variant knows whether it is normally debit-balanced or credit-balanced\n- [ ] No `_` arm in any match on `Account` anywhere in the crate\n\n**Notes**\nThe no-wildcard rule is the whole point: when M4 adds a hazard-bonus account, the compiler walks you to every site that must consider it."
+  },
+  {
+    "title": "feat(ledger): Posting and Direction",
+    "milestone": "M1 Ledger",
+    "labels": ["domain", "value-object"],
+    "body": "**Why**\nThe atom of double-entry. Getting the shape right here makes the balance invariant in the next issue almost trivial to state.\n\n**Acceptance**\n- [ ] `Posting` is an `Account`, a non-negative `Coin`, and a `Direction`\n- [ ] `Direction` is `Debit` or `Credit` — an enum, never a `bool`\n- [ ] A posting of zero is rejected at construction; it carries no information and clutters the ledger\n\n**Notes**\nThis is why `Coin` can stay unsigned: direction lives in the type, not in the sign of the amount."
+  },
+  {
+    "title": "feat(ledger): a JournalEntry that cannot be unbalanced",
+    "milestone": "M1 Ledger",
+    "labels": ["domain", "invariant"],
+    "body": "**Why**\nThe headline invariant of the whole project. If an unbalanced entry is unconstructable, no amount of downstream code can produce a ledger that does not balance.\n\n**Acceptance**\n- [ ] `JournalEntry::new(postings, narrative) -> Result<Self, LedgerError>`\n- [ ] Returns `Err(LedgerError::Unbalanced { debits, credits })` unless the two sides are exactly equal\n- [ ] Rejects an entry with fewer than two postings\n- [ ] Postings are not publicly mutable after construction — no field is `pub`, no `&mut` accessor\n- [ ] Carries a human-readable narrative, because a ledger nobody can read is a ledger nobody trusts\n\n**Write first**\n```rust\n#[test]\nfn should_reject_an_entry_whose_debits_do_not_equal_its_credits() { /* ... */ }\n```\n\n**Notes**\nResist adding a `JournalEntry::new_unchecked` for test convenience. The moment it exists, something will call it."
+  },
+  {
+    "title": "feat(ledger): an append-only Ledger",
+    "milestone": "M1 Ledger",
+    "labels": ["domain", "aggregate", "invariant", "proptest"],
+    "body": "**Why**\nAccounting history is not editable. Enforcing that in the type keeps every later feature — corrections, bitemporal queries, audit — honest by construction.\n\n**Acceptance**\n- [ ] `Ledger::post(&mut self, entry: JournalEntry) -> EntryId`\n- [ ] `Ledger::balance(&self, account: &Account) -> Coin` (with direction, or a signed balance type)\n- [ ] No public API removes, replaces, or mutates an existing entry — not even in tests\n- [ ] Property: after **any** sequence of posts, the sum of all debits equals the sum of all credits\n- [ ] Property: the trial balance across every account is zero\n\n**Write first**\nThe trial-balance property. Generate random valid entries, post them all, assert zero.\n\n**Notes**\nThis property is the one that will catch a bug in `settle()` in M4, three milestones from now. It earns its keep."
+  },
+  {
+    "title": "feat(ledger): corrections by reversal, never by edit",
+    "milestone": "M1 Ledger",
+    "labels": ["domain", "invariant"],
+    "body": "**Why**\nMistakes happen — a bounty is posted at the wrong amount. The accounting answer is not to fix the number but to post an entry that undoes it, leaving both visible forever.\n\n**Acceptance**\n- [ ] `Ledger::reverse(&mut self, original: EntryId, narrative) -> Result<EntryId, LedgerError>`\n- [ ] The reversal mirrors every posting with the opposite direction, so it balances by construction\n- [ ] The reversal records which entry it reverses\n- [ ] Reversing an already-reversed entry is an error naming the existing reversal\n- [ ] After a reversal, the net balance of the affected accounts returns to its prior value\n\n**Write first**\n```rust\n#[test]\nfn should_restore_prior_balances_when_an_entry_is_reversed() { /* ... */ }\n```"
+  },
+  {
+    "title": "feat(ledger): bitemporal stamps on every entry",
+    "milestone": "M1 Ledger",
+    "labels": ["domain", "invariant"],
+    "body": "**Why**\nWhen a party returns from a three-week delve, the Guild learns on day 21 about a death that happened on day 12. The ledger has to answer both \"what was true\" and \"what did we know, and when\".\n\nThis is the single most transferable idea in the project.\n\n**Acceptance**\n- [ ] Every entry carries `occurred_at` and `recorded_at`, both `WorldInstant`\n- [ ] `recorded_at` before `occurred_at` is allowed (a backdated entry) but `recorded_at` may never be in the ledger's future\n- [ ] `balance_as_of(&self, account, occurred: WorldInstant, known: WorldInstant) -> Coin`\n- [ ] Test: post a backdated death benefit, then show the day-12 balance differs depending on whether you ask as-known-on-day-12 or as-known-on-day-21\n\n**Further reading**\nFowler, Bitemporal History: https://martinfowler.com/articles/bitemporal-history.html\n\n**Notes**\nThat one test is the demo. If this project ever becomes a talk or a blog post, this is the slide."
+  },
+
+  {
+    "title": "feat(quest): HazardTier",
+    "milestone": "M2 Quest & Escrow",
+    "labels": ["domain", "value-object"],
+    "body": "**Why**\nTier drives the Guild's fee and the hazard bonus in M4, and it is the field the future insurance context will rate premiums on.\n\n**Acceptance**\n- [ ] An ordered enum — something like `Errand`, `Venture`, `Perilous`, `Deadly`, `Mythic`\n- [ ] `Ord` derives meaningfully, so tiers compare\n- [ ] No numeric tier codes leaking into the API\n- [ ] Exhaustive matching, no `_` arm\n\n**Notes**\nKeep the fee percentages **out** of this type. Tier is a fact about the quest; what the Guild charges for it is a policy, and policies change (M4)."
+  },
+  {
+    "title": "feat(quest): Bounty and the escrow state machine",
+    "milestone": "M2 Quest & Escrow",
+    "labels": ["domain", "invariant"],
+    "body": "**Why**\nThe Guild holds a client's money. Paying out more than was deposited is the failure this type exists to make impossible.\n\n**Acceptance**\n- [ ] States: `Unfunded -> Held -> Released | Refunded`\n- [ ] Releasing more than is held returns `Err`, always\n- [ ] Partial release is supported (one member paid before the rest), and the residual stays tracked\n- [ ] Released plus refunded plus residual equals deposited, at every point in the lifecycle\n- [ ] Every illegal transition returns a typed error naming the state it was in\n\n**Write first**\n```rust\n#[test]\nfn should_refuse_to_release_more_than_the_escrow_holds() { /* ... */ }\n```\n\n**Notes**\nWorth trying the typestate pattern here (`Escrow<Held>` vs `Escrow<Released>`) so misuse fails at compile time rather than returning `Err`. It is a good fit — but it fights with storing quests in a collection later. Try it, and if it gets awkward, write down why you backed out. That note is more valuable than the code."
+  },
+  {
+    "title": "feat(quest): QuestState and its legal transitions",
+    "milestone": "M2 Quest & Escrow",
+    "labels": ["domain", "invariant"],
+    "body": "**Why**\nA quest that gets settled twice pays twice. The lifecycle needs to be a real state machine, not a status string.\n\n**Acceptance**\n- [ ] `Draft -> Posted -> Accepted -> InProgress -> Resolved -> Settled`\n- [ ] Abandonment can occur from `Accepted` or `InProgress`\n- [ ] Every illegal transition returns a typed error naming **both** the current and attempted state\n- [ ] `Settled` is terminal — nothing transitions out of it\n- [ ] A table-driven test covers all legal transitions and a representative set of illegal ones\n\n**Notes**\nParameterise the transition test rather than writing a loop inside one test — no logic in tests."
+  },
+  {
+    "title": "feat(quest): the Quest aggregate",
+    "milestone": "M2 Quest & Escrow",
+    "labels": ["domain", "aggregate"],
+    "body": "**Why**\nThe aggregate root is where the escrow and the state machine stop being independent facts and start enforcing each other.\n\n**Acceptance**\n- [ ] `post`, `accept`, `begin`, `resolve` — all returning `Result`\n- [ ] A quest cannot be posted without a funded escrow (the invariant that justifies the aggregate)\n- [ ] A quest cannot be accepted without a party\n- [ ] All mutation goes through the root; no caller reaches in and sets state\n- [ ] The quest holds a `HazardTier`, a `Bounty`, a `ContractId`, and the client\n\n**Notes**\nAggregate boundary question worth thinking about explicitly: is `Party` inside this aggregate or a separate one referenced by `PartyId`? Membership changes far more often than the quest does, which argues for separate. Whichever you pick, write the reasoning in the module docs — this is the decision the whole M3 design hangs off.\n\nhttps://martinfowler.com/bliki/DDD_Aggregate.html"
+  },
+  {
+    "title": "feat(quest): resolution outcomes",
+    "milestone": "M2 Quest & Escrow",
+    "labels": ["domain", "value-object"],
+    "body": "**Why**\nSettlement behaves completely differently across these three, and each needs different data to do its job.\n\n**Acceptance**\n- [ ] `Succeeded` carries proof of completion and any loot recovered\n- [ ] `Failed` carries a reason, and determines whether the bounty is refunded to the client\n- [ ] `Abandoned` carries when it was abandoned — that instant bounds every member's service in M4\n- [ ] Data lives in the variants; there is no `Option` field that is only meaningful for one outcome\n\n**Notes**\nIf you find yourself writing `if outcome.is_success() { self.loot.unwrap() }`, the data is on the wrong side of the enum boundary."
+  },
+
+  {
+    "title": "feat(party): Enlistment as a half-open interval",
+    "milestone": "M3 Party Over Time",
+    "labels": ["domain", "value-object", "invariant"],
+    "body": "**Why**\nMembership over time is the heart of this domain and the reason settlement is interesting. It starts with one correct interval type.\n\n**Acceptance**\n- [ ] `Enlistment` holds an `AdventurerId`, a `joined_at`, an `Option<WorldInstant>` departure, and a `DepartureReason` when departed\n- [ ] Departure before joining is unconstructable — the constructor returns `Err`\n- [ ] Departed-at-`None` and a `Some(reason)` cannot coexist, nor the reverse (make the pair one enum, not two fields)\n- [ ] `overlaps(&self, other: &Enlistment) -> bool`, half-open so back-to-back intervals do not count as overlapping\n- [ ] `duration_within(&self, window) -> Duration` for the time-weighted split later\n\n**Write first**\n```rust\n#[test]\nfn should_reject_an_enlistment_that_ends_before_it_begins() { /* ... */ }\n```\n\n**Notes**\nHalf-open `[start, end)` is the choice that makes adjacent intervals behave. Pick it deliberately and say so in the docs."
+  },
+  {
+    "title": "feat(party): DepartureReason",
+    "milestone": "M3 Party Over Time",
+    "labels": ["domain", "value-object"],
+    "body": "**Why**\nSettlement pays a corpse differently from a deserter. This is the enum that carries that distinction, and a `bool departed` would destroy it.\n\n**Acceptance**\n- [ ] `Withdrew`, `Died`, `Expelled`, `Completed` at minimum\n- [ ] `Died` carries what settlement needs to route the payout to an estate\n- [ ] `Expelled` carries a cause — the Guild does not expel people casually\n- [ ] Exhaustive matching everywhere, no `_` arm\n\n**Notes**\nThis enum is a natural integration point for the future Registry of Souls context. Do not build that now, but do not model `Died` in a way that makes it impossible later."
+  },
+  {
+    "title": "feat(party): the Party aggregate",
+    "milestone": "M3 Party Over Time",
+    "labels": ["domain", "aggregate", "invariant", "proptest"],
+    "body": "**Why**\nThe invariants only make sense across the whole roster, which is exactly what an aggregate root is for.\n\n**Acceptance**\n- [ ] `enlist(adventurer, at)` and `depart(adventurer, at, reason)`, both returning `Result`\n- [ ] Enlisting someone already actively enlisted is an error\n- [ ] Departing someone who never joined, or already departed, is an error\n- [ ] Any operation dated before the party formed is an error\n- [ ] Property: **for any sequence of valid operations, one adventurer's intervals never overlap**\n- [ ] Property: an adventurer's intervals are always in chronological order\n\n**Write first**\nThe non-overlap property. It is the invariant that makes `service_duration` meaningful, and it will catch the resurrection bug in the next-but-one issue."
+  },
+  {
+    "title": "feat(party): membership queries over time",
+    "milestone": "M3 Party Over Time",
+    "labels": ["domain", "aggregate"],
+    "body": "**Why**\nSettlement asks the party questions about the past. These are those questions.\n\n**Acceptance**\n- [ ] `members_at(&self, instant) -> Vec<AdventurerId>` — who was on the books at that moment\n- [ ] `service_duration(&self, adventurer) -> Duration` — total across all intervals, gaps excluded\n- [ ] `service_within(&self, adventurer, window) -> Duration` — clipped to the quest window\n- [ ] Queries are pure and take `&self` — command-query separation, no query mutates\n- [ ] Edge cases tested: the exact join instant, the exact departure instant, an instant before the party existed\n\n**Notes**\nWith half-open intervals, someone who joins at `t` is a member at `t` and someone who departs at `t` is not. Assert both explicitly — it is the boundary that will bite you in M4."
+  },
+  {
+    "title": "feat(party): death and resurrection",
+    "milestone": "M3 Party Over Time",
+    "labels": ["domain", "aggregate", "invariant"],
+    "body": "**Why**\nThe case that justifies modelling membership as intervals instead of a set. Nothing else in the domain forces it.\n\n**Acceptance**\n- [ ] An adventurer who departed with `Died` can be re-enlisted after being raised\n- [ ] The result is **two distinct intervals**, not one interval with an edited end — the death happened and stays in the record\n- [ ] `service_duration` sums both intervals and excludes the interval spent dead\n- [ ] Re-enlistment dated before the death is an error\n- [ ] The non-overlap property from the aggregate issue still holds\n\n**Write first**\n```rust\n#[test]\nfn should_keep_pre_death_service_when_a_member_is_resurrected() { /* ... */ }\n```\n\n**Notes**\nOpen question to decide and document: does time spent dead count toward the share? The Guild's position is that it does not, but a contrary rule is defensible and the split policy in M4 should be able to express either."
+  },
+
+  {
+    "title": "feat(settlement): the FeeSchedule trait",
+    "milestone": "M4 Settlement",
+    "labels": ["domain"],
+    "body": "**Why**\nThe Guild's cut will change. Open/Closed means a new schedule arrives as a new type, not as an edit to `settle()`.\n\n**Acceptance**\n- [ ] `trait FeeSchedule { fn fee(&self, gross: Coin, tier: HazardTier) -> Coin; }`\n- [ ] `FlatRate` and `Tiered` implementations\n- [ ] Adding a third implementation requires touching no existing file\n- [ ] The fee can never exceed the gross bounty — assert it, and property-test it\n- [ ] Rounding direction is decided, documented, and consistent (the Guild rounds in its own favour; say so)\n\n**Further reading**\nhttps://blog.cleancoder.com/uncle-bob/2014/05/12/TheOpenClosedPrinciple.html"
+  },
+  {
+    "title": "feat(settlement): the SplitPolicy trait",
+    "milestone": "M4 Settlement",
+    "labels": ["domain"],
+    "body": "**Why**\nHow a party divides its net reward is a house rule, not a law of nature. Parties should be able to agree different ones.\n\n**Acceptance**\n- [ ] `trait SplitPolicy { fn weights(&self, party: &Party, window) -> Result<Shares, SettlementError>; }`\n- [ ] `EqualShare` — everyone who served at all gets an equal cut\n- [ ] `TimeWeighted` — proportional to `service_within` over the quest window\n- [ ] Both return `Shares`, so sum-to-one is already guaranteed before any money moves\n- [ ] A party where nobody served any time is a typed error, not a divide-by-zero\n\n**Notes**\nThis is where M0's `Shares` pays off: the policy cannot hand `allocate` a set of weights that does not sum to one, because such a value cannot be constructed."
+  },
+  {
+    "title": "feat(settlement): settle() emits balanced entries",
+    "milestone": "M4 Settlement",
+    "labels": ["domain", "invariant"],
+    "body": "**Why**\nEverything upstream converges here. This is the function the whole crate exists to make safe.\n\n**Acceptance**\n- [ ] `settle(quest: &ResolvedQuest, party: &Party, fees: &dyn FeeSchedule, split: &dyn SplitPolicy) -> Result<Settlement, SettlementError>`\n- [ ] Produces journal entries, and returns them rather than posting — command-query separation, and it keeps `settle` pure and trivially testable\n- [ ] Escrow released equals fee income plus all payables, **to the copper**\n- [ ] Settling an unresolved quest is a typed error\n- [ ] Settling an already-settled quest is a typed error\n- [ ] A failed quest refunds the client instead of paying the party\n- [ ] Property: for any resolved quest and any valid party, the emitted entries balance and conserve the escrow exactly\n\n**Notes**\nTaking `&dyn` rather than generics keeps the signature readable; there is no hot loop here. If you would rather have static dispatch, that is fine too — just do not let the choice leak into the domain's vocabulary."
+  },
+  {
+    "title": "feat(settlement): estate payouts for the fallen",
+    "milestone": "M4 Settlement",
+    "labels": ["domain"],
+    "body": "**Why**\nA dead adventurer has still earned their share. It just does not go to them.\n\n**Acceptance**\n- [ ] A member who departed with `Died` is credited to `EstatePayable`, not `AdventurerPayable`\n- [ ] A member who died and was **resurrected before resolution** is paid normally — they are standing there\n- [ ] A member who withdrew or was expelled is paid per the split policy for the time they served, with no death handling\n- [ ] The total is unaffected by which accounts the money lands in — the ledger balances identically\n\n**Write first**\n```rust\n#[test]\nfn should_credit_the_estate_when_a_member_dies_and_stays_dead() { /* ... */ }\n```\n\n**Notes**\nThe resurrection case is the one worth writing first, because it is the one a naive implementation gets wrong."
+  },
+  {
+    "title": "test: the Bramblewick scenario, end to end",
+    "milestone": "M4 Settlement",
+    "labels": ["domain", "invariant", "tdd"],
+    "body": "**Why**\nThe golden test, and the demo. One narrative that exercises every invariant the crate has, readable by someone who does not know Rust.\n\n**The scenario**\nA Perilous-tier quest, bounty 40g, party of four:\n\n- **Bramblewick Thorne** — serves the full delve, hours 0 to 48\n- **Alder Quill** — dies at hour 12, and stays dead\n- **Mirren Vale** — dies at hour 12, is raised at hour 30, serves to the end\n- **Osric Penn** — joins late at hour 40\n\nResolved `Succeeded` at hour 48. Tiered fee schedule, time-weighted split.\n\n**Acceptance**\n- [ ] The scenario runs end to end through the real API, no test-only constructors\n- [ ] The ledger balances and the trial balance is zero\n- [ ] Escrow out equals fee plus payables exactly — not a copper unaccounted for\n- [ ] Alder's share is credited to `EstatePayable`; Mirren's is not\n- [ ] Mirren's service excludes hours 12 to 30\n- [ ] Osric's share is non-zero but smallest\n- [ ] Every number in the expected output is written as an inline comment explaining where it came from\n\n**Notes**\nWhen this passes, the domain core is done and the crate has earned a TUI. It is also the test to paste into the README."
+  }
+]
