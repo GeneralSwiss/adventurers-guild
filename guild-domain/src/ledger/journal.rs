@@ -829,6 +829,70 @@ mod tests {
     }
 
     #[test]
+    fn should_file_a_reversal_under_the_stamps_it_was_given() {
+        // A correction is learned when it is learned — day 21 — but it takes
+        // effect when the original did, on day 12. Both stamps are the
+        // caller's to choose: the ledger has no way to know either.
+        let mut ledger = Ledger::new();
+        let id = ledger
+            .post(funding(400_000), Stamps::new(day(12), day(12)))
+            .expect("stamps that do not run backwards");
+
+        let reversal = ledger
+            .reverse(id, correction(), Stamps::new(day(12), day(21)))
+            .expect("a normal entry to reverse");
+
+        assert_eq!(
+            ledger.stamps(&reversal),
+            Some(Stamps::new(day(12), day(21)))
+        );
+    }
+
+    #[test]
+    fn should_hide_a_correction_from_anyone_asking_before_it_was_known() {
+        // The two features meeting. The funding stands as far as day 20 is
+        // concerned, because the correction had not been written yet — and it
+        // is undone for anyone asking from day 21 onwards, about the very
+        // same moment.
+        let mut ledger = Ledger::new();
+        let id = ledger
+            .post(funding(400_000), Stamps::new(day(12), day(12)))
+            .expect("stamps that do not run backwards");
+        ledger
+            .reverse(id, correction(), Stamps::new(day(12), day(21)))
+            .expect("a normal entry to reverse");
+
+        assert_eq!(
+            ledger.balance_as_of(&Account::GuildVault, day(12), day(20)),
+            Ok(Balance::Debit(Coin::from_coppers(400_000)))
+        );
+        assert_eq!(
+            ledger.balance_as_of(&Account::GuildVault, day(12), day(21)),
+            Ok(Balance::Nil)
+        );
+    }
+
+    #[test]
+    fn should_refuse_a_reversal_filed_behind_what_the_journal_knew() {
+        // reverse appends through post, so it inherits the rule rather than
+        // restating it.
+        let mut ledger = Ledger::new();
+        let id = ledger
+            .post(funding(400_000), Stamps::new(day(12), day(21)))
+            .expect("stamps that do not run backwards");
+
+        let refused = ledger.reverse(id, correction(), Stamps::new(day(12), day(20)));
+
+        assert_eq!(
+            refused,
+            Err(LedgerError::KnowledgeRunsBackwards {
+                recorded_at: day(20),
+                latest: day(21),
+            })
+        );
+    }
+
+    #[test]
     fn should_refuse_to_reverse_an_entry_that_was_already_reversed() {
         // Twice undone is worse than not undone at all: the second reversal
         // carries the accounts past where they started, and the journal ends
