@@ -62,16 +62,44 @@
 //! [`LedgerError::SideOverflowed`] rather than wrapped: a ledger that silently
 //! rolls over is worse than one that stops.
 
+use std::iter::Rev;
+
 use super::direction::Direction;
 use super::narrative::Narrative;
 use super::posting::Posting;
 use crate::money::{Coin, MoneyError};
 
-/// A balanced set of postings, and what they were for.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct JournalEntry {
+pub struct NormalEntry {
     postings: Vec<Posting>,
     narrative: Narrative,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReversalEntry {
+    postings: Vec<Posting>,
+    narrative: Narrative,
+}
+
+impl NormalEntry {
+    pub fn reverse(&self, narrative: Narrative) -> ReversalEntry {
+        let postings = self
+            .postings
+            .iter()
+            .map(|posting| posting.reverse())
+            .collect();
+        ReversalEntry {
+            postings,
+            narrative,
+        }
+    }
+}
+
+/// A balanced set of postings, and what they were for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum JournalEntry {
+    Normal(NormalEntry),
+    Reverse(ReversalEntry),
 }
 
 impl JournalEntry {
@@ -120,10 +148,10 @@ impl JournalEntry {
             return Err(LedgerError::Unbalanced { debits, credits });
         }
 
-        Ok(Self {
+        Ok(Self::Normal(NormalEntry {
             postings,
             narrative,
-        })
+        }))
     }
 
     /// Sums one side of the entry.
@@ -139,13 +167,31 @@ impl JournalEntry {
     /// balanced.
     #[must_use]
     pub fn postings(&self) -> &[Posting] {
-        &self.postings
+        match self {
+            Self::Normal(normal) => &normal.postings,
+            Self::Reverse(reversed) => &reversed.postings,
+        }
     }
 
     /// What this entry says it was for.
     #[must_use]
     pub fn narrative(&self) -> &Narrative {
-        &self.narrative
+        match self {
+            Self::Normal(normal) => &normal.narrative,
+            Self::Reverse(reversed) => &reversed.narrative,
+        }
+    }
+}
+
+impl From<ReversalEntry> for JournalEntry {
+    fn from(reversal: ReversalEntry) -> Self {
+        Self::Reverse(reversal)
+    }
+}
+
+impl From<NormalEntry> for JournalEntry {
+    fn from(normal: NormalEntry) -> Self {
+        Self::Normal(normal)
     }
 }
 
@@ -176,6 +222,15 @@ pub enum LedgerError {
         /// The arithmetic failure underneath.
         source: MoneyError,
     },
+    /// The entry `id` names was not found in the ledger.
+    #[error("the entry {id:?} was not found in the ledger")]
+    EntryNotFound {
+        /// The entry that was looked for.
+        id: crate::identifiers::EntryId,
+    },
+    /// The entry was already a reversal, so it cannot be reversed again.
+    #[error("the entry {0:?} was already a reversal, so it cannot be reversed again")]
+    UnableToReverse(crate::identifiers::EntryId),
 }
 
 #[cfg(test)]
@@ -199,6 +254,49 @@ mod tests {
 
     fn credit(account: Account, coppers: u64) -> Posting {
         Posting::credit(account, Coin::from_coppers(coppers)).expect("a posting of something")
+    }
+
+    fn correction() -> Narrative {
+        "correction of quest-1".parse().expect("a narrative")
+    }
+
+    /// A funding entry: coin into the vault, and the debt to show for it.
+    fn funding() -> JournalEntry {
+        JournalEntry::new(
+            vec![
+                debit(Account::GuildVault, 400_000),
+                credit(Account::ClientEscrow(adventurer("lord-bramble")), 400_000),
+            ],
+            narrative(),
+        )
+        .expect("a balanced entry")
+    }
+
+    /// The `NormalEntry` inside an entry `new` just built.
+    ///
+    /// `reverse` lives on `NormalEntry` rather than on `JournalEntry`, which
+    /// is what makes "a reversal cannot be reversed" a matter of which type
+    /// you are holding rather than a runtime check.
+    fn normal(entry: &JournalEntry) -> &NormalEntry {
+        match entry {
+            JournalEntry::Normal(normal) => normal,
+            JournalEntry::Reverse(_) => panic!("`new` builds a normal entry"),
+        }
+    }
+
+    /// The debit and credit totals of an entry, summed wide so that a
+    /// deliberately huge entry cannot overflow the check itself.
+    fn sides(entry: &JournalEntry) -> (u128, u128) {
+        entry
+            .postings()
+            .iter()
+            .fold((0, 0), |(debits, credits), posting| {
+                let amount = u128::from(posting.amount().as_coppers());
+                match posting.direction() {
+                    Direction::Debit => (debits + amount, credits),
+                    Direction::Credit => (debits, credits + amount),
+                }
+            })
     }
 
     #[test]
@@ -355,6 +453,139 @@ mod tests {
                     credits: Coin::from_coppers(credited),
                 })
             );
+        }
+    }
+
+    #[test]
+    fn should_build_a_normal_entry_from_balanced_postings() {
+        // `new` is the door normal entries come through, and the only one.
+        // A reversal is built from an entry that already exists.
+        assert!(matches!(funding(), JournalEntry::Normal(_)));
+    }
+
+    #[test]
+    fn should_flip_every_posting_when_reversing_an_entry() {
+        // Same accounts, same amounts, same order — every one the other way
+        // round. Order is part of it: a journal is read, and a reversal that
+        // shuffles its lines is harder to set against the entry it undoes.
+        let entry = funding();
+
+        let reversal: JournalEntry = normal(&entry).reverse(correction()).into();
+
+        assert_eq!(
+            reversal.postings(),
+            [
+                credit(Account::GuildVault, 400_000),
+                debit(Account::ClientEscrow(adventurer("lord-bramble")), 400_000),
+            ]
+        );
+    }
+
+    #[test]
+    fn should_reverse_an_entry_of_more_than_two_postings() {
+        // The settlement shape. A `reverse` that handled only a pair — or that
+        // flipped the first posting and copied the rest — passes the test
+        // above and fails this one.
+        let thorne = adventurer("bramblewick-thorne");
+        let entry = JournalEntry::new(
+            vec![
+                debit(Account::ClientEscrow(adventurer("lord-bramble")), 400_000),
+                credit(Account::GuildFeeIncome, 60_000),
+                credit(Account::AdventurerPayable(thorne.clone()), 340_000),
+            ],
+            narrative(),
+        )
+        .expect("a balanced entry");
+
+        let reversal: JournalEntry = normal(&entry).reverse(correction()).into();
+
+        assert_eq!(
+            reversal.postings(),
+            [
+                credit(Account::ClientEscrow(adventurer("lord-bramble")), 400_000),
+                debit(Account::GuildFeeIncome, 60_000),
+                debit(Account::AdventurerPayable(thorne), 340_000),
+            ]
+        );
+    }
+
+    #[test]
+    fn should_take_the_narrative_the_reversal_was_given() {
+        // Not the original's. A reversal is written for its own reason — a
+        // quest abandoned, an amount keyed wrong — and that reason is what a
+        // reader needs.
+        let entry = funding();
+
+        let reversal: JournalEntry = normal(&entry).reverse(correction()).into();
+
+        assert_eq!(reversal.narrative(), &correction());
+    }
+
+    #[test]
+    fn should_read_a_reversal_as_a_reversal_rather_than_a_normal_entry() {
+        // The distinction the enum exists for: it is what lets the ledger
+        // refuse to reverse a reversal without keeping a flag of its own.
+        let entry = funding();
+
+        let reversal: JournalEntry = normal(&entry).reverse(correction()).into();
+
+        assert!(matches!(reversal, JournalEntry::Reverse(_)));
+    }
+
+    #[test]
+    fn should_leave_the_entry_it_reverses_untouched() {
+        // `reverse` borrows. Corrections are written, never applied in place.
+        let entry = funding();
+
+        let _ = normal(&entry).reverse(correction());
+
+        assert_eq!(entry, funding());
+    }
+
+    #[test]
+    fn should_read_postings_and_narrative_through_either_kind_of_entry() {
+        // Both accessors match on the variant, so each has two arms that could
+        // disagree — reaching into the wrong field, or handing back the
+        // original's narrative for a reversal.
+        let entry = funding();
+        let reversal: JournalEntry = normal(&entry).reverse(correction()).into();
+
+        assert_eq!(entry.postings().len(), 2);
+        assert_eq!(entry.narrative(), &narrative());
+        assert_eq!(reversal.postings().len(), 2);
+        assert_eq!(reversal.narrative(), &correction());
+    }
+
+    proptest! {
+        /// A reversal balances, whatever entry it came from.
+        ///
+        /// Worth stating because a reversal does not go through
+        /// [`JournalEntry::new`] and so is never checked: it is balanced only
+        /// because flipping every posting swaps the two sides whole, and this
+        /// is what would fail were `reverse` to drop, duplicate, or re-amount
+        /// one of them.
+        ///
+        /// It asserts the sides *swap* rather than merely that they agree,
+        /// which is the stronger claim — an entry built with equal sides
+        /// balances either way round, and would not notice a reversal that
+        /// quietly rebuilt it.
+        #[test]
+        fn should_swap_the_two_sides_of_whatever_entry_it_reverses(
+            credits in proptest::collection::vec(1_u64..1_000_000, 1..12)
+        ) {
+            let total: u64 = credits.iter().sum();
+            let mut postings = vec![debit(Account::GuildVault, total)];
+            postings.extend(
+                credits
+                    .iter()
+                    .map(|amount| credit(Account::GuildFeeIncome, *amount)),
+            );
+            let entry = JournalEntry::new(postings, narrative()).expect("a balanced entry");
+
+            let reversal: JournalEntry = normal(&entry).reverse(correction()).into();
+
+            let (debits, credits) = sides(&entry);
+            prop_assert_eq!(sides(&reversal), (credits, debits));
         }
     }
 }

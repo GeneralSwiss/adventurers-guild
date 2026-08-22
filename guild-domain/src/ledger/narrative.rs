@@ -62,6 +62,13 @@ impl Narrative {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    /// Attaches the `original` entry's identifier to the narrative, so a reversal can be read as "this is the reversal of that entry".
+    #[must_use]
+    pub fn reversal_of(self, original: crate::identifiers::EntryId) -> Self {
+        let reversed = format!("reversal of {}: {}", original, self.0);
+        Self(reversed)
+    }
 }
 
 impl Display for Narrative {
@@ -127,6 +134,7 @@ pub enum InvalidNarrative {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::identifiers::EntryId;
 
     #[test]
     fn should_hold_the_words_it_was_given() {
@@ -173,5 +181,47 @@ mod tests {
         let narrative = Narrative::from_str("estate payout: alder quill").expect("a narrative");
 
         assert_eq!(narrative.as_str(), "estate payout: alder quill");
+    }
+
+    #[test]
+    fn should_name_the_entry_a_reversal_undoes() {
+        // A reversal that does not say what it reverses is just a second
+        // entry, and nobody reading the journal can tie the two together.
+        let narrative = Narrative::from_str("settlement of quest-1").expect("a narrative");
+
+        let reversal = narrative.reversal_of(EntryId::sequential(7));
+
+        assert_eq!(
+            reversal.as_str(),
+            "reversal of entry-7: settlement of quest-1"
+        );
+    }
+
+    #[test]
+    fn should_still_read_as_a_narrative_after_being_marked_a_reversal() {
+        // `reversal_of` builds its text rather than parsing it, so it is the
+        // one door into a Narrative where nothing re-checks the rule. This
+        // pins that what comes out would still be accepted going in.
+        let reversal = Narrative::from_str("refund of quest-2")
+            .expect("a narrative")
+            .reversal_of(EntryId::sequential(1));
+
+        assert_eq!(Narrative::from_str(reversal.as_str()), Ok(reversal));
+    }
+
+    #[test]
+    fn should_keep_both_entries_readable_when_a_reversal_is_marked_twice() {
+        // Nothing in this type forbids it — the rule that a reversal cannot be
+        // reversed lives in the ledger. What is pinned here is that the text
+        // nests rather than losing the inner entry's name.
+        let twice = Narrative::from_str("settlement of quest-1")
+            .expect("a narrative")
+            .reversal_of(EntryId::sequential(3))
+            .reversal_of(EntryId::sequential(4));
+
+        assert_eq!(
+            twice.as_str(),
+            "reversal of entry-4: reversal of entry-3: settlement of quest-1"
+        );
     }
 }

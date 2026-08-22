@@ -66,6 +66,7 @@ use super::direction::Direction;
 use super::journal_entry::{JournalEntry, LedgerError};
 use super::posting::Posting;
 use crate::identifiers::EntryId;
+use crate::ledger::narrative;
 use crate::money::Coin;
 use std::collections::HashSet;
 
@@ -112,6 +113,24 @@ impl Ledger {
         let id = EntryId::sequential(self.entries.len() as u64 + 1);
         self.entries.push((id.clone(), entry));
         id
+    }
+
+    /// Reverses the entry `original` names, and appends the reversal.
+    pub fn reverse(
+        &mut self,
+        original: EntryId,
+        narrative: narrative::Narrative,
+    ) -> Result<EntryId, LedgerError> {
+        let entry = self.entry(&original).ok_or(LedgerError::EntryNotFound {
+            id: original.clone(),
+        })?;
+        match entry {
+            JournalEntry::Normal(normal) => {
+                let reversed: JournalEntry = normal.reverse(narrative).into();
+                Ok(self.post(reversed))
+            }
+            JournalEntry::Reverse(_) => Err(LedgerError::UnableToReverse(original)),
+        }
     }
 
     /// Finds the entry `id` names.
@@ -187,6 +206,10 @@ mod tests {
 
     fn narrative() -> Narrative {
         "settlement of quest-1".parse().expect("a narrative")
+    }
+
+    fn correction() -> Narrative {
+        "quest-1 abandoned".parse().expect("a narrative")
     }
 
     fn entry(postings: Vec<Posting>) -> JournalEntry {
@@ -309,6 +332,123 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn should_undo_the_original_entrys_effect_on_every_balance() {
+        // What a reversal is for. Both accounts the funding touched are back
+        // where they started, and neither is back there because anything was
+        // erased — the journal now holds two entries that cancel.
+        let mut ledger = Ledger::new();
+        let id = ledger.post(funding(400_000));
+
+        ledger
+            .reverse(id, correction())
+            .expect("a normal entry to reverse");
+
+        assert_eq!(ledger.balance(&Account::GuildVault), Ok(Balance::Nil));
+        assert_eq!(ledger.balance(&patron()), Ok(Balance::Nil));
+    }
+
+    #[test]
+    fn should_leave_the_entry_it_reverses_in_the_journal() {
+        // The append-only rule, at the one place there would be a temptation
+        // to break it. Bitemporal queries in M1 ask what the books said at a
+        // past moment, which is unanswerable if a correction removes its
+        // original.
+        let mut ledger = Ledger::new();
+        let posted = funding(400_000);
+        let id = ledger.post(posted.clone());
+
+        ledger
+            .reverse(id.clone(), correction())
+            .expect("a normal entry to reverse");
+
+        assert_eq!(ledger.entry(&id), Some(&posted));
+        assert_eq!(ledger.len(), 2);
+    }
+
+    #[test]
+    fn should_name_the_reversal_with_an_id_of_its_own() {
+        // The reversal is an entry like any other: it is found by its own id,
+        // and it carries the narrative the caller gave for making it.
+        let mut ledger = Ledger::new();
+        let id = ledger.post(funding(400_000));
+
+        let reversal = ledger
+            .reverse(id.clone(), correction())
+            .expect("a normal entry to reverse");
+
+        assert_ne!(reversal, id);
+        assert_eq!(
+            ledger.entry(&reversal).map(JournalEntry::narrative),
+            Some(&correction())
+        );
+    }
+
+    #[test]
+    fn should_refuse_to_reverse_an_entry_it_never_minted() {
+        let mut ledger = Ledger::new();
+
+        let refused = ledger.reverse(EntryId::sequential(1), correction());
+
+        assert_eq!(
+            refused,
+            Err(LedgerError::EntryNotFound {
+                id: EntryId::sequential(1)
+            })
+        );
+    }
+
+    #[test]
+    fn should_refuse_to_reverse_a_reversal() {
+        // Otherwise a reversal could be reversed back into the original, and
+        // "what does this entry correct" stops having one answer. A reversal
+        // posted in error is corrected by posting the original again, which
+        // reads honestly in the journal.
+        let mut ledger = Ledger::new();
+        let id = ledger.post(funding(400_000));
+        let reversal = ledger
+            .reverse(id, correction())
+            .expect("a normal entry to reverse");
+
+        let refused = ledger.reverse(reversal.clone(), correction());
+
+        assert_eq!(refused, Err(LedgerError::UnableToReverse(reversal)));
+    }
+
+    #[test]
+    fn should_append_nothing_when_it_refuses_to_reverse() {
+        // A refusal that had already pushed an entry would leave the journal
+        // holding half a correction.
+        let mut ledger = Ledger::new();
+        let id = ledger.post(funding(400_000));
+        let reversal = ledger
+            .reverse(id, correction())
+            .expect("a normal entry to reverse");
+
+        let _ = ledger.reverse(reversal, correction());
+        let _ = ledger.reverse(EntryId::sequential(99), correction());
+
+        assert_eq!(ledger.len(), 2);
+    }
+
+    #[test]
+    fn should_reverse_each_of_several_entries_independently() {
+        // Reversing the first entry must undo the first entry, not the last
+        // one posted or the one the id happens to sit next to.
+        let mut ledger = Ledger::new();
+        let first = ledger.post(funding(400_000));
+        ledger.post(funding(1_000));
+
+        ledger
+            .reverse(first, correction())
+            .expect("a normal entry to reverse");
+
+        assert_eq!(
+            ledger.balance(&Account::GuildVault),
+            Ok(Balance::Debit(Coin::from_coppers(1_000)))
+        );
+    }
+
     /// The five accounts the properties draw from.
     ///
     /// Deliberately small, so that entries collide on accounts and the
@@ -419,5 +559,38 @@ mod tests {
 
             prop_assert_eq!(debits, credits);
         }
+
+        /// Reversing every entry in a journal empties every account.
+        ///
+        /// The end-to-end claim the whole reversal path exists to support,
+        /// held at the scale where the pieces meet: `Posting::reverse` flips a
+        /// side, `NormalEntry::reverse` flips all of them, `Ledger::reverse`
+        /// finds the right entry and appends. A fault in any one of those
+        /// leaves coin stranded in some account here.
+        ///
+        /// It is the counterpart to
+        /// `should_leave_a_trial_balance_of_zero_after_any_sequence_of_posts`
+        /// and sees what that one cannot: a trial balance of zero says the two
+        /// sides agree, while nil in every account says nothing is left at all.
+        #[test]
+        fn should_empty_every_account_when_every_entry_is_reversed(
+            parts in proptest::collection::vec(entry_parts(), 0..8)
+        ) {
+            let pool = pool();
+            let mut ledger = Ledger::new();
+            let ids: Vec<EntryId> = parts
+                .iter()
+                .map(|part| ledger.post(build(part, &pool)))
+                .collect();
+
+            for id in ids {
+                ledger.reverse(id, narrative()).expect("a normal entry to reverse");
+            }
+
+            for account in ledger.accounts() {
+                prop_assert_eq!(ledger.balance(account), Ok(Balance::Nil));
+            }
+        }
+
     }
 }
