@@ -108,6 +108,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn should_hand_out_its_shares_in_the_order_they_were_given() {
+        // `allocate` borrows through `iter`, so consuming the set is public
+        // API nothing in the crate exercises yet. Order is the part that
+        // matters: a caller indexes the parts it gets back against the
+        // parties that supplied the shares.
+        let supplied = [
+            Share::new(1, 4).expect("a non-zero denominator"),
+            Share::new(3, 4).expect("a non-zero denominator"),
+        ];
+        let shares = Shares::new(&supplied).expect("a quarter and three quarters sum to one");
+
+        let consumed: Vec<Share> = shares.into_iter().collect();
+
+        assert_eq!(consumed, supplied.to_vec());
+    }
+
+    #[test]
     fn should_reject_a_zero_denominator() {
         assert_eq!(
             Share::new(3, 0),
