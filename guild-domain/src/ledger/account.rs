@@ -38,18 +38,22 @@
 //!
 //! # Then where do "debit" and "credit" live?
 //!
-//! On `Posting`, as constructors of immutable facts rather than as mutators:
+//! On [`Posting`](super::Posting), as constructors of immutable facts rather
+//! than as mutators:
 //!
-//! ```ignore
-//! JournalEntry::new(
-//!     vec![
-//!         Posting::debit(Account::ClientEscrow(patron.clone()), Coin::from_coppers(400_000)),
-//!         Posting::credit(Account::GuildFeeIncome,              Coin::from_coppers(60_000)),
-//!         Posting::credit(Account::AdventurerPayable(thorne),   Coin::from_coppers(340_000)),
-//!     ],
-//!     "settlement of quest-1",
-//! )?
 //! ```
+//! use guild_domain::ledger::{Account, Posting};
+//! use guild_domain::money::Coin;
+//!
+//! let thorne = "bramblewick-thorne".parse()?;
+//!
+//! let fee = Posting::credit(Account::GuildFeeIncome, Coin::from_coppers(60_000))?;
+//! let share = Posting::credit(Account::AdventurerPayable(thorne), Coin::from_coppers(340_000))?;
+//! # Ok::<(), Box<dyn std::error::Error>>(())
+//! ```
+//!
+//! Gathering postings like those into an entry that refuses to exist unless
+//! they balance is the journal entry's job, not the account's.
 //!
 //! The money-tracking behaviour lives on the ledger because **the invariant is
 //! global**. "Debits equal credits", and "the trial balance is zero", span

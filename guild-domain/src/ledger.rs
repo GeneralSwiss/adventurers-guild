@@ -27,6 +27,8 @@
 
 pub mod account;
 pub mod direction;
+pub mod posting;
 
 pub use account::{Account, AccountKind};
 pub use direction::Direction;
+pub use posting::{Posting, PostingError};
