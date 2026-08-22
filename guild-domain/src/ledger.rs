@@ -57,7 +57,7 @@ pub mod stamps;
 pub use account::{Account, AccountKind};
 pub use balance::Balance;
 pub use direction::Direction;
-pub use journal::Ledger;
+pub use journal::{Ledger, Record};
 pub use journal_entry::{JournalEntry, LedgerError, NormalEntry, ReversalEntry};
 pub use narrative::{InvalidNarrative, Narrative};
 pub use posting::{Posting, PostingError};
