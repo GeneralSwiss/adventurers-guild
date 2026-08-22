@@ -9,6 +9,7 @@
 //! | [`narrative`]     | [`Narrative`], what an entry says it was for             |
 //! | [`journal_entry`] | [`JournalEntry`], a set of postings that must balance    |
 //! | [`balance`]       | [`Balance`], what an account is worth and which way      |
+//! | [`stamps`]        | [`Stamps`], when an entry happened and when it was known |
 //! | [`journal`]       | [`Ledger`], the append-only record of every entry        |
 //!
 //! Quest, Party, and Escrow are the *story* — who agreed to what, who served
@@ -51,6 +52,7 @@ pub mod journal;
 pub mod journal_entry;
 pub mod narrative;
 pub mod posting;
+pub mod stamps;
 
 pub use account::{Account, AccountKind};
 pub use balance::Balance;
@@ -59,3 +61,4 @@ pub use journal::Ledger;
 pub use journal_entry::{JournalEntry, LedgerError, NormalEntry, ReversalEntry};
 pub use narrative::{InvalidNarrative, Narrative};
 pub use posting::{Posting, PostingError};
+pub use stamps::Stamps;
