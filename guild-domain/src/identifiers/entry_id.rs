@@ -5,8 +5,10 @@ use std::str::FromStr;
 
 /// Identifies a single entry in the Guild's journal.
 ///
-/// Constructed only by parsing, so holding one is proof that the text inside
-/// is well formed: non-empty, and free of whitespace and control characters.
+/// Holding one is proof that the text inside is well formed: non-empty, and
+/// free of whitespace and control characters. Text from outside gets there by
+/// parsing; the ledger mints its own with
+/// [`sequential`](EntryId::sequential).
 ///
 /// Not interchangeable with any other identifier in this module — see the
 /// [module documentation](crate::identifiers) for the compile-time proof.
@@ -22,6 +24,31 @@ use std::str::FromStr;
 pub struct EntryId(String);
 
 impl EntryId {
+    /// The identifier of the `ordinal`-th entry in a journal.
+    ///
+    /// The ledger mints these as it appends, so the id of an entry is its
+    /// position in the journal — which is what makes a journal readable back
+    /// in the order it was written.
+    ///
+    /// Infallible, unlike [`TryFrom<String>`], and deliberately so. That impl
+    /// is fallible because most strings are not valid identifiers; the text
+    /// this one builds is well formed by construction, and there is no failure
+    /// to report. A `Result` whose error can never be produced forces every
+    /// call site to handle a case that does not exist — the same argument the
+    /// [`money`](crate::money) module makes about `Coin::from_coppers`.
+    ///
+    /// `TryFrom` remains the only door *untrusted text* comes through.
+    ///
+    /// ```
+    /// use guild_domain::identifiers::EntryId;
+    ///
+    /// assert_eq!(EntryId::sequential(1).to_string(), "entry-1");
+    /// ```
+    #[must_use]
+    pub fn sequential(ordinal: u64) -> Self {
+        Self(format!("entry-{ordinal}"))
+    }
+
     /// Borrows the identifier as a string slice.
     #[must_use]
     pub fn as_str(&self) -> &str {
@@ -42,8 +69,10 @@ impl TryFrom<String> for EntryId {
     /// [`EntryId`] when the candidate is well formed, into the error when it is
     /// not. Neither path copies.
     ///
-    /// This is the only place an [`EntryId`] is constructed, so it is the
-    /// only place the rule can be enforced or bypassed. [`FromStr`] delegates
+    /// This is the only place *text from outside* becomes an [`EntryId`], so
+    /// it is the only place the rule can be enforced or bypassed.
+    /// [`sequential`](EntryId::sequential) is the other constructor, and it
+    /// needs no rule because it builds its own text. [`FromStr`] delegates
     /// here rather than the reverse, because a `&str` must be copied before it
     /// can be owned — the borrowing impl is the one that can be written in
     /// terms of the owning impl without waste.
@@ -156,6 +185,26 @@ mod tests {
         let id = EntryId::try_from(owned).expect("a well-formed id");
 
         assert_eq!(id.as_str().as_ptr(), buffer);
+    }
+
+    #[test]
+    fn should_mint_a_sequential_id_from_its_position() {
+        assert_eq!(EntryId::sequential(7).as_str(), "entry-7");
+    }
+
+    #[test]
+    fn should_mint_distinct_ids_for_distinct_positions() {
+        assert_ne!(EntryId::sequential(1), EntryId::sequential(2));
+    }
+
+    #[test]
+    fn should_mint_ids_a_parser_would_also_accept() {
+        // The point of the infallible constructor is that it cannot produce
+        // text the fallible one would reject. If that ever stops holding, an
+        // id minted by the ledger would fail to round-trip through storage.
+        let minted = EntryId::sequential(42);
+
+        assert_eq!(EntryId::from_str(minted.as_str()), Ok(minted));
     }
 
     #[test]
