@@ -123,6 +123,39 @@ impl Posting {
         })
     }
 
+    /// The posting that undoes this one: same account, same amount, the
+    /// other direction.
+    ///
+    /// Infallible, and the one construction that does not go through
+    /// [`new`](Self::new) — it needs no rule, because a posting that already
+    /// moves something still moves it when it is turned around. Reversing
+    /// twice gives back the original.
+    ///
+    /// ```
+    /// use guild_domain::ledger::{Account, Direction, Posting};
+    /// use guild_domain::money::Coin;
+    ///
+    /// let funding = Posting::debit(Account::GuildVault, Coin::from_coppers(400_000))?;
+    /// let undone = funding.reverse();
+    ///
+    /// assert_eq!(undone.direction(), Direction::Credit);
+    /// assert_eq!(undone.amount(), funding.amount());
+    /// # Ok::<(), guild_domain::ledger::PostingError>(())
+    /// ```
+    #[must_use]
+    pub fn reverse(&self) -> Self {
+        let reversed_direction = match self.direction {
+            Direction::Debit => Direction::Credit,
+            Direction::Credit => Direction::Debit,
+        };
+
+        Self {
+            account: self.account.clone(),
+            amount: self.amount,
+            direction: reversed_direction,
+        }
+    }
+
     /// The account this posting names.
     #[must_use]
     pub fn account(&self) -> &Account {
@@ -156,6 +189,7 @@ pub enum PostingError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     fn adventurer(name: &str) -> crate::identifiers::AdventurerId {
         name.parse().expect("a well-formed id")
@@ -231,5 +265,85 @@ mod tests {
                 account: Account::AdventurerPayable(mirren)
             }
         );
+    }
+
+    #[test]
+    fn should_flip_a_debit_into_a_credit() {
+        // What a reversal is, at the level of one posting: the same money,
+        // the same account, moved back the way it came.
+        let posting = Posting::debit(Account::GuildVault, Coin::from_coppers(400_000))
+            .expect("a posting of more than nothing");
+
+        let reversed = posting.reverse();
+
+        assert_eq!(reversed.direction(), Direction::Credit);
+    }
+
+    #[test]
+    fn should_flip_a_credit_into_a_debit_too() {
+        // Triangulates the rule onto the other direction. A `reverse` that
+        // always hands back a credit passes the test above and fails this one.
+        let posting = Posting::credit(Account::GuildFeeIncome, Coin::from_coppers(60_000))
+            .expect("a posting of more than nothing");
+
+        let reversed = posting.reverse();
+
+        assert_eq!(reversed.direction(), Direction::Debit);
+    }
+
+    #[test]
+    fn should_move_the_same_amount_of_the_same_account_when_reversed() {
+        // Only the direction may change. A reversal that also moved the money
+        // somewhere else would still balance, and would still be wrong.
+        let thorne = adventurer("bramblewick-thorne");
+
+        let reversed = Posting::debit(
+            Account::AdventurerPayable(thorne.clone()),
+            Coin::from_coppers(166_530),
+        )
+        .expect("a posting of more than nothing")
+        .reverse();
+
+        assert_eq!(reversed.account(), &Account::AdventurerPayable(thorne));
+        assert_eq!(reversed.amount(), Coin::from_coppers(166_530));
+    }
+
+    #[test]
+    fn should_leave_the_posting_it_reverses_untouched() {
+        // `reverse` borrows and hands back something new. The same discipline
+        // the ledger applies at a larger scale: history is corrected by
+        // writing a reversal, never by editing what is already written.
+        let posting = Posting::debit(Account::GuildVault, Coin::from_coppers(400_000))
+            .expect("a posting of more than nothing");
+
+        let _ = posting.reverse();
+
+        assert_eq!(posting.direction(), Direction::Debit);
+    }
+
+    proptest! {
+        /// Reversing twice gives back what was reversed.
+        ///
+        /// Stated as a property because it is the one claim that ties the two
+        /// example tests together: flipping is an involution, so no amount and
+        /// no starting direction can leave a posting somewhere it cannot get
+        /// back from. It also pins the non-zero invariant through a reversal —
+        /// were `reverse` to go through `new` and lose it, an equal posting
+        /// could not be rebuilt.
+        #[test]
+        fn should_give_back_the_original_posting_when_reversed_twice(
+            coppers in 1_u64..u64::MAX,
+            debited in proptest::bool::ANY,
+        ) {
+            let amount = Coin::from_coppers(coppers);
+            let posting = if debited {
+                Posting::debit(Account::GuildVault, amount)
+            } else {
+                Posting::credit(Account::GuildVault, amount)
+            }
+            .expect("a posting of more than nothing");
+
+            prop_assert_eq!(posting.reverse().reverse(), posting);
+        }
     }
 }
