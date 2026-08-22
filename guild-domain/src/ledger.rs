@@ -8,6 +8,8 @@
 //! | [`posting`]       | [`Posting`], one account moved by one amount, one way    |
 //! | [`narrative`]     | [`Narrative`], what an entry says it was for             |
 //! | [`journal_entry`] | [`JournalEntry`], a set of postings that must balance    |
+//! | [`balance`]       | [`Balance`], what an account is worth and which way      |
+//! | [`journal`]       | [`Ledger`], the append-only record of every entry        |
 //!
 //! Quest, Party, and Escrow are the *story* — who agreed to what, who served
 //! which hours, who died. This module is the *record*: where every copper is,
@@ -33,6 +35,7 @@
 pub mod account;
 pub mod balance;
 pub mod direction;
+pub mod journal;
 pub mod journal_entry;
 pub mod narrative;
 pub mod posting;
@@ -40,6 +43,7 @@ pub mod posting;
 pub use account::{Account, AccountKind};
 pub use balance::Balance;
 pub use direction::Direction;
+pub use journal::Ledger;
 pub use journal_entry::{JournalEntry, LedgerError};
 pub use narrative::{InvalidNarrative, Narrative};
 pub use posting::{Posting, PostingError};

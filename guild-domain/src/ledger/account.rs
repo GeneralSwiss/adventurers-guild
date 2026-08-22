@@ -144,7 +144,7 @@ pub enum AccountKind {
 /// Enumerating the chart means the compiler owns it. When M4 adds a
 /// hazard-bonus account, every match that must reconsider becomes a build
 /// failure — which only works because no match on this type carries a `_` arm.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Account {
     /// A bounty the Guild is holding on a client's behalf.
     ///
