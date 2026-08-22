@@ -29,6 +29,15 @@
 //! anything unbalanced, no sequence of entries can add up to books that do not
 //! balance.
 //!
+//! # Two clocks on everything
+//!
+//! Every journal row carries [`Stamps`] — when it happened, and when the
+//! Guild found out. A party reports a day-12 death when it walks back through
+//! the gate on day 21, so those are routinely weeks apart, and
+//! [`Ledger::balance_as_of`](journal::Ledger::balance_as_of) can be asked
+//! about either axis. "What was true" and "what did we know" are different
+//! questions and the books answer both.
+//!
 //! # Nothing is ever unwritten
 //!
 //! The journal only grows. A mistake is corrected by

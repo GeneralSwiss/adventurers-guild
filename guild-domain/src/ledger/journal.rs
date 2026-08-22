@@ -77,6 +77,38 @@
 //! a projection built *outside* the domain, invalidated by appends — not a
 //! field on the aggregate.
 //!
+//! # Two clocks, and why one will not do
+//!
+//! Every row carries [`Stamps`]: when the thing happened, and when the Guild
+//! found out. News travels at the speed of a walking party, so those are
+//! routinely weeks apart, and collapsing them into one timestamp forces a
+//! choice between two lies — either the books say a death happened on the day
+//! the survivors reported it, or they silently rewrite what the payroll clerk
+//! knew last Tuesday.
+//!
+//! [`Ledger::balance_as_of`] takes a moment on each axis, so both questions
+//! stay answerable from the same journal. [`Ledger::balance`] is that fold
+//! asked at the far end of both.
+//!
+//! The stamps sit on the journal row rather than inside [`JournalEntry`] for
+//! the same reason the [`EntryId`] does: both are facts about *filing*, and an
+//! entry that has not been posted has neither.
+//!
+//! One rule binds them. `recorded_at` may not run behind an entry already in
+//! the journal — knowledge accumulates, and a journal that could be written
+//! into behind its own back would answer as-known-on queries about a state it
+//! was never in. `occurred_at` is left free in both directions: backdating is
+//! the case the Guild lives on, and postdating a bounty effective at the next
+//! muster is just as real.
+//!
+//! Neither rule needs a clock, which this crate does not have. The journal is
+//! its own witness: what bounds a recording is the newest recording already
+//! filed. See [`Ledger::latest_record`].
+//!
+//! Martin Fowler, [Bitemporal History](https://martinfowler.com/articles/bitemporal-history.html),
+//! is the reference; the [`stamps`](super::stamps) module carries the domain
+//! argument.
+//!
 //! # Where an id comes from
 //!
 //! An entry's [`EntryId`] is its position in the journal, minted by
@@ -1131,6 +1163,66 @@ mod tests {
 
             for account in ledger.accounts() {
                 prop_assert_eq!(ledger.balance(account), Ok(Balance::Nil));
+            }
+        }
+
+
+        /// Asked at the far end of both axes, the bitemporal balance is the
+        /// plain one.
+        ///
+        /// The two folds walk different iterators, so this is what keeps them
+        /// from drifting: a filter that dropped an entry it should have kept,
+        /// or a `postings_as_of` that visited records in a different order,
+        /// shows up here across arbitrary journals rather than in the one
+        /// shape an example test happens to use.
+        #[test]
+        fn should_answer_as_the_plain_balance_when_asked_at_the_end_of_both_axes(
+            parts in proptest::collection::vec((entry_parts(), 1_u64..50, 0_u64..50), 0..8)
+        ) {
+            let pool = pool();
+            let mut ledger = Ledger::new();
+            let mut recorded = 0_u64;
+            for (part, occurred, gap) in &parts {
+                recorded += gap;
+                ledger
+                    .post(build(part, &pool), Stamps::new(day(*occurred), day(recorded)))
+                    .expect("recordings that never run backwards");
+            }
+
+            let ever = WorldInstant::from_seconds_since_founding(u64::MAX);
+            for account in ledger.accounts() {
+                prop_assert_eq!(
+                    ledger.balance_as_of(account, ever, ever),
+                    ledger.balance(account)
+                );
+            }
+        }
+
+        /// Before the journal begins, every account is nil.
+        ///
+        /// Every entry here happens and is recorded strictly after the
+        /// Founding, so asking about the Founding itself must see none of
+        /// them — the accounts exist, and nothing has reached them yet. This
+        /// is the property an off-by-one in either bound breaks.
+        #[test]
+        fn should_report_nil_everywhere_when_asked_before_anything_happened(
+            parts in proptest::collection::vec((entry_parts(), 1_u64..50, 1_u64..50), 0..8)
+        ) {
+            let pool = pool();
+            let mut ledger = Ledger::new();
+            let mut recorded = 0_u64;
+            for (part, occurred, gap) in &parts {
+                recorded += gap;
+                ledger
+                    .post(build(part, &pool), Stamps::new(day(*occurred), day(recorded)))
+                    .expect("recordings that never run backwards");
+            }
+
+            for account in ledger.accounts() {
+                prop_assert_eq!(
+                    ledger.balance_as_of(account, WorldInstant::FOUNDING, WorldInstant::FOUNDING),
+                    Ok(Balance::Nil)
+                );
             }
         }
 

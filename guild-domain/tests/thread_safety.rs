@@ -49,7 +49,7 @@ use guild_domain::identifiers::{
 };
 use guild_domain::ledger::{
     Account, AccountKind, Balance, Direction, InvalidNarrative, JournalEntry, Ledger, LedgerError,
-    Narrative, Posting, PostingError,
+    Narrative, NormalEntry, Posting, PostingError, Record, ReversalEntry, Stamps,
 };
 use guild_domain::money::{Coin, InvalidShare, MoneyError, Share, Shares};
 use guild_domain::time::{Duration, TimeError, WorldInstant};
@@ -103,6 +103,10 @@ fn every_ledger_type_crosses_thread_boundaries() {
     assert_send_sync::<Posting>();
     assert_send_sync::<Narrative>();
     assert_send_sync::<JournalEntry>();
+    assert_send_sync::<NormalEntry>();
+    assert_send_sync::<ReversalEntry>();
+    assert_send_sync::<Stamps>();
+    assert_send_sync::<Record>();
     assert_send_sync::<Balance>();
     assert_send_sync::<Ledger>();
 
