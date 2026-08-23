@@ -296,6 +296,16 @@ pub enum LedgerError {
     /// The entry was already a reversal, so it cannot be reversed again.
     #[error("the entry {0} was already a reversal, so it cannot be reversed again")]
     UnableToReverse(EntryId),
+    /// The entry was filed behind something the journal already knew.
+    #[error(
+        "an entry recorded at {recorded_at} runs behind the journal, which already knew of {latest}"
+    )]
+    KnowledgeRunsBackwards {
+        /// When the refused entry claimed to have been recorded.
+        recorded_at: crate::time::WorldInstant,
+        /// The most recent moment the journal had already filed.
+        latest: crate::time::WorldInstant,
+    },
     /// The entry has a reversal already, and a second would undo it twice.
     #[error("the entry {original} was already reversed by {reversal}")]
     AlreadyReversed {

@@ -2,19 +2,24 @@
 //! other.
 //!
 //! ```
-//! use guild_domain::ledger::{Account, Balance, JournalEntry, Ledger, Posting};
+//! use guild_domain::ledger::{Account, Balance, JournalEntry, Ledger, Posting, Stamps};
 //! use guild_domain::money::Coin;
+//! use guild_domain::time::{Duration, WorldInstant};
 //!
+//! let day = |n: u64| WorldInstant::from_seconds_since_founding(n * Duration::SECONDS_PER_DAY);
 //! let patron = "lord-bramble".parse()?;
 //! let mut ledger = Ledger::new();
 //!
-//! ledger.post(JournalEntry::new(
-//!     vec![
-//!         Posting::debit(Account::GuildVault, Coin::from_coppers(400_000))?,
-//!         Posting::credit(Account::ClientEscrow(patron), Coin::from_coppers(400_000))?,
-//!     ],
-//!     "quest-1 funded".parse()?,
-//! )?);
+//! ledger.post(
+//!     JournalEntry::new(
+//!         vec![
+//!             Posting::debit(Account::GuildVault, Coin::from_coppers(400_000))?,
+//!             Posting::credit(Account::ClientEscrow(patron), Coin::from_coppers(400_000))?,
+//!         ],
+//!         "quest-1 funded".parse()?,
+//!     )?,
+//!     Stamps::new(day(3), day(3)),
+//! )?;
 //!
 //! assert_eq!(
 //!     ledger.balance(&Account::GuildVault)?,
@@ -72,6 +77,38 @@
 //! a projection built *outside* the domain, invalidated by appends — not a
 //! field on the aggregate.
 //!
+//! # Two clocks, and why one will not do
+//!
+//! Every row carries [`Stamps`]: when the thing happened, and when the Guild
+//! found out. News travels at the speed of a walking party, so those are
+//! routinely weeks apart, and collapsing them into one timestamp forces a
+//! choice between two lies — either the books say a death happened on the day
+//! the survivors reported it, or they silently rewrite what the payroll clerk
+//! knew last Tuesday.
+//!
+//! [`Ledger::balance_as_of`] takes a moment on each axis, so both questions
+//! stay answerable from the same journal. [`Ledger::balance`] is that fold
+//! asked at the far end of both.
+//!
+//! The stamps sit on the journal row rather than inside [`JournalEntry`] for
+//! the same reason the [`EntryId`] does: both are facts about *filing*, and an
+//! entry that has not been posted has neither.
+//!
+//! One rule binds them. `recorded_at` may not run behind an entry already in
+//! the journal — knowledge accumulates, and a journal that could be written
+//! into behind its own back would answer as-known-on queries about a state it
+//! was never in. `occurred_at` is left free in both directions: backdating is
+//! the case the Guild lives on, and postdating a bounty effective at the next
+//! muster is just as real.
+//!
+//! Neither rule needs a clock, which this crate does not have. The journal is
+//! its own witness: what bounds a recording is the newest recording already
+//! filed. See [`Ledger::latest_record`].
+//!
+//! Martin Fowler, [Bitemporal History](https://martinfowler.com/articles/bitemporal-history.html),
+//! is the reference; the [`stamps`](super::stamps) module carries the domain
+//! argument.
+//!
 //! # Where an id comes from
 //!
 //! An entry's [`EntryId`] is its position in the journal, minted by
@@ -84,14 +121,50 @@ use super::direction::Direction;
 use super::journal_entry::{JournalEntry, LedgerError};
 use super::narrative::Narrative;
 use super::posting::Posting;
+use super::stamps::Stamps;
 use crate::identifiers::EntryId;
 use crate::money::Coin;
+use crate::time::WorldInstant;
 use std::collections::HashSet;
+
+/// One entry as the journal holds it: what was written, what it was named,
+/// and the two moments it answers to.
+///
+/// The stamps live here rather than on [`JournalEntry`] for the same reason
+/// the [`EntryId`] does. Both are minted when the entry is *filed*, and an
+/// entry that has not been posted has no id and no `recorded_at` — there is
+/// nothing yet to have recorded it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Record {
+    id: EntryId,
+    stamps: Stamps,
+    entry: JournalEntry,
+}
+
+impl Record {
+    /// What the journal named this entry.
+    #[must_use]
+    pub fn id(&self) -> &EntryId {
+        &self.id
+    }
+
+    /// When it happened, and when the Guild found out.
+    #[must_use]
+    pub fn stamps(&self) -> Stamps {
+        self.stamps
+    }
+
+    /// The entry itself.
+    #[must_use]
+    pub fn entry(&self) -> &JournalEntry {
+        &self.entry
+    }
+}
 
 /// An append-only journal of balanced entries.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Ledger {
-    entries: Vec<(EntryId, JournalEntry)>,
+    entries: Vec<Record>,
 }
 
 impl Ledger {
@@ -103,34 +176,93 @@ impl Ledger {
         }
     }
 
-    /// Appends `entry` and names it.
+    /// Appends `entry` under `stamps` and names it.
     ///
-    /// The only way to change a ledger, and it only ever grows. Infallible,
-    /// because an entry that exists has already proved it balances — there is
-    /// nothing left for the journal to object to.
+    /// The only way to change a ledger, and it only ever grows.
+    ///
+    /// Nothing here objects to the entry itself — one that exists has already
+    /// proved it balances. The one thing that can be refused is *when it was
+    /// filed*, which is a fact about the journal rather than about the entry.
+    ///
+    /// # Errors
+    ///
+    /// [`LedgerError::KnowledgeRunsBackwards`] if `stamps` were recorded
+    /// earlier than an entry already in the journal. Knowledge accumulates:
+    /// filing something behind what is already filed would mean the Guild
+    /// un-learned it, and every as-known-on query afterwards would describe a
+    /// journal that was never in that state.
+    ///
+    /// Equal moments are fine — one report from a returning party lands as
+    /// several entries recorded in the same breath.
+    ///
+    /// This says nothing about [`occurred_at`](Stamps::occurred_at), which may
+    /// fall wherever the truth puts it, before or after. Backdating is the
+    /// case the Guild lives on.
     ///
     /// ```
-    /// use guild_domain::ledger::{Account, JournalEntry, Ledger, Posting};
+    /// use guild_domain::ledger::{Account, JournalEntry, Ledger, Posting, Stamps};
     /// use guild_domain::money::Coin;
+    /// use guild_domain::time::{Duration, WorldInstant};
     ///
+    /// let day = |n: u64| WorldInstant::from_seconds_since_founding(n * Duration::SECONDS_PER_DAY);
     /// let patron = "lord-bramble".parse()?;
     /// let mut ledger = Ledger::new();
     ///
-    /// let id = ledger.post(JournalEntry::new(
-    ///     vec![
-    ///         Posting::debit(Account::GuildVault, Coin::from_coppers(400_000))?,
-    ///         Posting::credit(Account::ClientEscrow(patron), Coin::from_coppers(400_000))?,
-    ///     ],
-    ///     "quest-1 funded".parse()?,
-    /// )?);
+    /// let id = ledger.post(
+    ///     JournalEntry::new(
+    ///         vec![
+    ///             Posting::debit(Account::GuildVault, Coin::from_coppers(400_000))?,
+    ///             Posting::credit(Account::ClientEscrow(patron), Coin::from_coppers(400_000))?,
+    ///         ],
+    ///         "quest-1 funded".parse()?,
+    ///     )?,
+    ///     Stamps::new(day(12), day(21)),
+    /// )?;
     ///
     /// assert!(ledger.entry(&id).is_some());
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
-    pub fn post(&mut self, entry: JournalEntry) -> EntryId {
+    pub fn post(&mut self, entry: JournalEntry, stamps: Stamps) -> Result<EntryId, LedgerError> {
+        if let Some(latest) = self.latest_record()
+            && stamps.recorded_at() < latest
+        {
+            return Err(LedgerError::KnowledgeRunsBackwards {
+                recorded_at: stamps.recorded_at(),
+                latest,
+            });
+        }
         let id = EntryId::sequential(self.entries.len() as u64 + 1);
-        self.entries.push((id.clone(), entry));
-        id
+        self.entries.push(Record {
+            id: id.clone(),
+            stamps,
+            entry,
+        });
+        Ok(id)
+    }
+
+    /// The most recent moment anything was filed, or `None` while the journal
+    /// is empty.
+    ///
+    /// The journal's own sense of "now": there is no clock in this crate, so
+    /// what bounds a recording is the newest recording already in it.
+    #[must_use]
+    pub fn latest_record(&self) -> Option<WorldInstant> {
+        self.entries
+            .last()
+            .map(|record| record.stamps.recorded_at())
+    }
+
+    /// The two moments the entry `id` names answers to.
+    #[must_use]
+    pub fn stamps(&self, id: &EntryId) -> Option<Stamps> {
+        self.record(id).map(Record::stamps)
+    }
+
+    /// Finds the whole journal row `id` names — the entry, its stamps, and
+    /// its name.
+    #[must_use]
+    pub fn record(&self, id: &EntryId) -> Option<&Record> {
+        self.entries.iter().find(|record| &record.id == id)
     }
 
     /// Undoes the entry `original` names by appending its mirror image, and
@@ -154,21 +286,31 @@ impl Ledger {
     ///   carry the accounts past where they started.
     ///
     /// ```
-    /// use guild_domain::ledger::{Account, Balance, JournalEntry, Ledger, Posting};
+    /// use guild_domain::ledger::{Account, Balance, JournalEntry, Ledger, Posting, Stamps};
     /// use guild_domain::money::Coin;
+    /// use guild_domain::time::{Duration, WorldInstant};
     ///
+    /// let day = |n: u64| WorldInstant::from_seconds_since_founding(n * Duration::SECONDS_PER_DAY);
     /// let patron = "lord-bramble".parse()?;
     /// let mut ledger = Ledger::new();
     ///
-    /// let funded = ledger.post(JournalEntry::new(
-    ///     vec![
-    ///         Posting::debit(Account::GuildVault, Coin::from_coppers(400_000))?,
-    ///         Posting::credit(Account::ClientEscrow(patron), Coin::from_coppers(400_000))?,
-    ///     ],
-    ///     "quest-1 funded".parse()?,
-    /// )?);
+    /// let funded = ledger.post(
+    ///     JournalEntry::new(
+    ///         vec![
+    ///             Posting::debit(Account::GuildVault, Coin::from_coppers(400_000))?,
+    ///             Posting::credit(Account::ClientEscrow(patron), Coin::from_coppers(400_000))?,
+    ///         ],
+    ///         "quest-1 funded".parse()?,
+    ///     )?,
+    ///     Stamps::new(day(3), day(3)),
+    /// )?;
     ///
-    /// let undone = ledger.reverse(funded.clone(), "quest-1 never began".parse()?)?;
+    /// // Learned on day 9 that the quest never began, effective day 3.
+    /// let undone = ledger.reverse(
+    ///     funded.clone(),
+    ///     "quest-1 never began".parse()?,
+    ///     Stamps::new(day(3), day(9)),
+    /// )?;
     ///
     /// // The vault is back where it started, and both entries are still there.
     /// assert_eq!(ledger.balance(&Account::GuildVault)?, Balance::Nil);
@@ -180,6 +322,7 @@ impl Ledger {
         &mut self,
         original: EntryId,
         narrative: Narrative,
+        stamps: Stamps,
     ) -> Result<EntryId, LedgerError> {
         let entry = self.entry(&original).ok_or(LedgerError::EntryNotFound {
             id: original.clone(),
@@ -194,7 +337,7 @@ impl Ledger {
             });
         }
         let reversal: JournalEntry = normal.reverse(original, narrative).into();
-        Ok(self.post(reversal))
+        self.post(reversal, stamps)
     }
 
     /// Finds the entry that undoes the one `original` names, if one was
@@ -211,17 +354,14 @@ impl Ledger {
     pub fn reversal_of(&self, original: &EntryId) -> Option<&EntryId> {
         self.entries
             .iter()
-            .find(|(_, entry)| entry.reverses() == Some(original))
-            .map(|(id, _)| id)
+            .find(|record| record.entry.reverses() == Some(original))
+            .map(Record::id)
     }
 
     /// Finds the entry `id` names.
     #[must_use]
     pub fn entry(&self, id: &EntryId) -> Option<&JournalEntry> {
-        self.entries
-            .iter()
-            .find(|(minted, _)| minted == id)
-            .map(|(_, entry)| entry)
+        self.record(id).map(Record::entry)
     }
 
     /// Nets everything posted to `account`.
@@ -236,22 +376,114 @@ impl Ledger {
     /// it is a state the journal can genuinely reach rather than a theoretical
     /// one.
     pub fn balance(&self, account: &Account) -> Result<Balance, LedgerError> {
-        let debits = self.total(account, Direction::Debit)?;
-        let credits = self.total(account, Direction::Credit)?;
+        Self::netting(self.postings(), account)
+    }
+
+    /// Nets everything posted to `account` that had happened by `occurred`
+    /// and was known by `known`.
+    ///
+    /// The two questions a ledger with one timestamp cannot both answer. A
+    /// death on day 12 that the Guild hears of on day 21 is invisible to
+    /// `balance_as_of(.., day(12), day(12))` and present in
+    /// `balance_as_of(.., day(12), day(21))` — and both answers are correct,
+    /// because they are answers to different questions. The first is what the
+    /// books said at the time; the second is what we now say was true at the
+    /// time.
+    ///
+    /// Both bounds are inclusive, and both are needed: dropping `known`
+    /// rewrites history every time the Guild learns something, and dropping
+    /// `occurred` cannot tell a backdated correction from a fresh event.
+    ///
+    /// [`balance`](Self::balance) is this function asked at the far end of
+    /// both axes.
+    ///
+    /// # Errors
+    ///
+    /// [`LedgerError::SideOverflowed`], on the same terms as
+    /// [`balance`](Self::balance).
+    ///
+    /// ```
+    /// use guild_domain::ledger::{Account, Balance, JournalEntry, Ledger, Posting, Stamps};
+    /// use guild_domain::money::Coin;
+    /// use guild_domain::time::{Duration, WorldInstant};
+    ///
+    /// let day = |n: u64| WorldInstant::from_seconds_since_founding(n * Duration::SECONDS_PER_DAY);
+    /// let patron = "lord-bramble".parse()?;
+    /// let alder: guild_domain::identifiers::AdventurerId = "alder-quill".parse()?;
+    /// let estate = Account::EstatePayable(alder);
+    /// let mut ledger = Ledger::new();
+    ///
+    /// // Died on day 12. The Guild only heard on day 21.
+    /// ledger.post(
+    ///     JournalEntry::new(
+    ///         vec![
+    ///             Posting::debit(Account::ClientEscrow(patron), Coin::from_coppers(100_000))?,
+    ///             Posting::credit(estate.clone(), Coin::from_coppers(100_000))?,
+    ///         ],
+    ///         "death benefit for alder-quill".parse()?,
+    ///     )?,
+    ///     Stamps::new(day(12), day(21)),
+    /// )?;
+    ///
+    /// // What the books said on day 12, and what we now say was true then.
+    /// assert_eq!(ledger.balance_as_of(&estate, day(12), day(12))?, Balance::Nil);
+    /// assert_eq!(
+    ///     ledger.balance_as_of(&estate, day(12), day(21))?,
+    ///     Balance::Credit(Coin::from_coppers(100_000)),
+    /// );
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn balance_as_of(
+        &self,
+        account: &Account,
+        occurred: WorldInstant,
+        known: WorldInstant,
+    ) -> Result<Balance, LedgerError> {
+        Self::netting(self.postings_as_of(occurred, known), account)
+    }
+
+    /// Nets `postings` for one account, debits against credits.
+    fn netting<'a>(
+        postings: impl Iterator<Item = &'a Posting> + Clone,
+        account: &Account,
+    ) -> Result<Balance, LedgerError> {
+        let debits = Self::total(postings.clone(), account, Direction::Debit)?;
+        let credits = Self::total(postings, account, Direction::Credit)?;
         Ok(Balance::netting(debits, credits))
     }
 
-    /// Sums one side of one account across the whole journal.
-    fn total(&self, account: &Account, side: Direction) -> Result<Coin, LedgerError> {
-        self.postings()
+    /// Sums one side of one account.
+    fn total<'a>(
+        postings: impl Iterator<Item = &'a Posting>,
+        account: &Account,
+        side: Direction,
+    ) -> Result<Coin, LedgerError> {
+        postings
             .filter(|posting| posting.account() == account && posting.direction() == side)
             .try_fold(Coin::ZERO, |sum, posting| sum.checked_add(posting.amount()))
             .map_err(|source| LedgerError::SideOverflowed { side, source })
     }
 
     /// Every posting in the journal, in the order they were written.
-    fn postings(&self) -> impl Iterator<Item = &Posting> {
-        self.entries.iter().flat_map(|(_, entry)| entry.postings())
+    fn postings(&self) -> impl Iterator<Item = &Posting> + Clone {
+        self.entries
+            .iter()
+            .flat_map(|record| record.entry.postings())
+    }
+
+    /// Every posting that had happened by `occurred` and was known by
+    /// `known`, in the order they were written.
+    fn postings_as_of(
+        &self,
+        occurred: WorldInstant,
+        known: WorldInstant,
+    ) -> impl Iterator<Item = &Posting> + Clone {
+        self.entries
+            .iter()
+            .filter(move |record| {
+                record.stamps.occurred_at() <= occurred && record.stamps.recorded_at() <= known
+            })
+            .flat_map(|record| record.entry.postings())
     }
 
     /// Every account any entry has touched, once each, first-posted first.
@@ -280,6 +512,7 @@ mod tests {
     use super::*;
     use crate::identifiers::AdventurerId;
     use crate::ledger::Narrative;
+    use crate::time::Duration;
     use proptest::prelude::*;
 
     fn adventurer(name: &str) -> AdventurerId {
@@ -292,6 +525,29 @@ mod tests {
 
     fn correction() -> Narrative {
         "quest-1 abandoned".parse().expect("a narrative")
+    }
+
+    fn day(count: u64) -> WorldInstant {
+        WorldInstant::from_seconds_since_founding(count * Duration::SECONDS_PER_DAY)
+    }
+
+    /// Stamps for a test that is not about time. Every moment is the
+    /// Founding, which no later recording can run behind.
+    fn whenever() -> Stamps {
+        Stamps::new(WorldInstant::FOUNDING, WorldInstant::FOUNDING)
+    }
+
+    /// Posts `entry` at a moment the journal will always accept, for the
+    /// tests that care what a balance comes to rather than when it was known.
+    fn post(ledger: &mut Ledger, entry: JournalEntry) -> EntryId {
+        ledger
+            .post(entry, whenever())
+            .expect("stamps that do not run backwards")
+    }
+
+    /// Reverses `original` at a moment the journal will always accept.
+    fn reverse(ledger: &mut Ledger, original: EntryId) -> Result<EntryId, LedgerError> {
+        ledger.reverse(original, correction(), whenever())
     }
 
     fn entry(postings: Vec<Posting>) -> JournalEntry {
@@ -331,7 +587,7 @@ mod tests {
         let mut ledger = Ledger::new();
         let posted = funding(400_000);
 
-        let id = ledger.post(posted.clone());
+        let id = post(&mut ledger, posted.clone());
 
         assert_eq!(ledger.entry(&id), Some(&posted));
     }
@@ -342,11 +598,62 @@ mod tests {
         // collide, a reversal in M1 would undo the wrong one.
         let mut ledger = Ledger::new();
 
-        let first = ledger.post(funding(400_000));
-        let second = ledger.post(funding(400_000));
+        let first = post(&mut ledger, funding(400_000));
+        let second = post(&mut ledger, funding(400_000));
 
         assert_ne!(first, second);
         assert_eq!(ledger.len(), 2);
+    }
+
+    #[test]
+    fn should_stamp_an_entry_with_when_it_happened_and_when_it_was_learned() {
+        let mut ledger = Ledger::new();
+
+        let id = ledger
+            .post(funding(400_000), Stamps::new(day(12), day(21)))
+            .expect("stamps that do not run backwards");
+
+        assert_eq!(ledger.stamps(&id), Some(Stamps::new(day(12), day(21))));
+    }
+
+    #[test]
+    fn should_refuse_an_entry_recorded_before_the_journal_already_knew() {
+        // Knowledge only accumulates. An entry written into the journal
+        // *earlier* than one already in it would mean the Guild un-learned
+        // something, and every as-known-on query after it would be answering
+        // about a journal that was never in that state.
+        //
+        // The entry being backdated is fine and is the whole point — it is
+        // the *recording* that may not go backwards.
+        let mut ledger = Ledger::new();
+        ledger
+            .post(funding(400_000), Stamps::new(day(12), day(21)))
+            .expect("stamps that do not run backwards");
+
+        let refused = ledger.post(funding(1_000), Stamps::new(day(1), day(20)));
+
+        assert_eq!(
+            refused,
+            Err(LedgerError::KnowledgeRunsBackwards {
+                recorded_at: day(20),
+                latest: day(21),
+            })
+        );
+    }
+
+    #[test]
+    fn should_accept_a_second_entry_recorded_at_the_very_same_moment() {
+        // Two things learned in the same breath. The rule is that knowledge
+        // does not go backwards, not that it strictly advances — a settlement
+        // posts several entries from one report.
+        let mut ledger = Ledger::new();
+        ledger
+            .post(funding(400_000), Stamps::new(day(12), day(21)))
+            .expect("stamps that do not run backwards");
+
+        let second = ledger.post(funding(1_000), Stamps::new(day(3), day(21)));
+
+        assert!(second.is_ok());
     }
 
     #[test]
@@ -368,11 +675,14 @@ mod tests {
         // The vault takes 400,000 in and pays 60,000 back out. The balance is
         // a fold over both entries, not a number either one of them holds.
         let mut ledger = Ledger::new();
-        ledger.post(funding(400_000));
-        ledger.post(entry(vec![
-            debit(Account::GuildFeeIncome, 60_000),
-            credit(Account::GuildVault, 60_000),
-        ]));
+        post(&mut ledger, funding(400_000));
+        post(
+            &mut ledger,
+            entry(vec![
+                debit(Account::GuildFeeIncome, 60_000),
+                credit(Account::GuildVault, 60_000),
+            ]),
+        );
 
         assert_eq!(
             ledger.balance(&Account::GuildVault),
@@ -383,8 +693,8 @@ mod tests {
     #[test]
     fn should_list_each_account_once_however_often_it_was_posted_to() {
         let mut ledger = Ledger::new();
-        ledger.post(funding(400_000));
-        ledger.post(funding(1_000));
+        post(&mut ledger, funding(400_000));
+        post(&mut ledger, funding(1_000));
 
         let accounts: Vec<&Account> = ledger.accounts().collect();
 
@@ -398,8 +708,8 @@ mod tests {
         // rather than wrapped, for the same reason the entry reports it: a
         // ledger that silently rolls over is worse than one that stops.
         let mut ledger = Ledger::new();
-        ledger.post(funding(u64::MAX));
-        ledger.post(funding(u64::MAX));
+        post(&mut ledger, funding(u64::MAX));
+        post(&mut ledger, funding(u64::MAX));
 
         let refused = ledger
             .balance(&Account::GuildVault)
@@ -420,11 +730,9 @@ mod tests {
         // where they started, and neither is back there because anything was
         // erased — the journal now holds two entries that cancel.
         let mut ledger = Ledger::new();
-        let id = ledger.post(funding(400_000));
+        let id = post(&mut ledger, funding(400_000));
 
-        ledger
-            .reverse(id, correction())
-            .expect("a normal entry to reverse");
+        reverse(&mut ledger, id).expect("a normal entry to reverse");
 
         assert_eq!(ledger.balance(&Account::GuildVault), Ok(Balance::Nil));
         assert_eq!(ledger.balance(&patron()), Ok(Balance::Nil));
@@ -437,13 +745,11 @@ mod tests {
         // no business touching, so a reversal that simply emptied the account
         // would pass a nil assertion and still be wrong.
         let mut ledger = Ledger::new();
-        ledger.post(funding(1_000));
+        post(&mut ledger, funding(1_000));
         let prior = ledger.balance(&Account::GuildVault);
-        let mistake = ledger.post(funding(400_000));
+        let mistake = post(&mut ledger, funding(400_000));
 
-        ledger
-            .reverse(mistake, correction())
-            .expect("a normal entry to reverse");
+        reverse(&mut ledger, mistake).expect("a normal entry to reverse");
 
         assert_eq!(ledger.balance(&Account::GuildVault), prior);
         assert_eq!(
@@ -455,11 +761,9 @@ mod tests {
     #[test]
     fn should_find_the_reversal_that_undoes_an_entry() {
         let mut ledger = Ledger::new();
-        let id = ledger.post(funding(400_000));
+        let id = post(&mut ledger, funding(400_000));
 
-        let reversal = ledger
-            .reverse(id.clone(), correction())
-            .expect("a normal entry to reverse");
+        let reversal = reverse(&mut ledger, id.clone()).expect("a normal entry to reverse");
 
         assert_eq!(ledger.reversal_of(&id), Some(&reversal));
     }
@@ -470,8 +774,8 @@ mod tests {
         // has not been corrected must not look corrected, or every reversal
         // after the first one in the journal would be refused.
         let mut ledger = Ledger::new();
-        let id = ledger.post(funding(400_000));
-        ledger.post(funding(1_000));
+        let id = post(&mut ledger, funding(400_000));
+        post(&mut ledger, funding(1_000));
 
         assert_eq!(ledger.reversal_of(&id), None);
     }
@@ -484,11 +788,9 @@ mod tests {
         // original.
         let mut ledger = Ledger::new();
         let posted = funding(400_000);
-        let id = ledger.post(posted.clone());
+        let id = post(&mut ledger, posted.clone());
 
-        ledger
-            .reverse(id.clone(), correction())
-            .expect("a normal entry to reverse");
+        reverse(&mut ledger, id.clone()).expect("a normal entry to reverse");
 
         assert_eq!(ledger.entry(&id), Some(&posted));
         assert_eq!(ledger.len(), 2);
@@ -499,11 +801,9 @@ mod tests {
         // The reversal is an entry like any other: it is found by its own id,
         // and it carries the narrative the caller gave for making it.
         let mut ledger = Ledger::new();
-        let id = ledger.post(funding(400_000));
+        let id = post(&mut ledger, funding(400_000));
 
-        let reversal = ledger
-            .reverse(id.clone(), correction())
-            .expect("a normal entry to reverse");
+        let reversal = reverse(&mut ledger, id.clone()).expect("a normal entry to reverse");
 
         assert_ne!(reversal, id);
         assert_eq!(
@@ -518,12 +818,76 @@ mod tests {
     fn should_refuse_to_reverse_an_entry_it_never_minted() {
         let mut ledger = Ledger::new();
 
-        let refused = ledger.reverse(EntryId::sequential(1), correction());
+        let refused = reverse(&mut ledger, EntryId::sequential(1));
 
         assert_eq!(
             refused,
             Err(LedgerError::EntryNotFound {
                 id: EntryId::sequential(1)
+            })
+        );
+    }
+
+    #[test]
+    fn should_file_a_reversal_under_the_stamps_it_was_given() {
+        // A correction is learned when it is learned — day 21 — but it takes
+        // effect when the original did, on day 12. Both stamps are the
+        // caller's to choose: the ledger has no way to know either.
+        let mut ledger = Ledger::new();
+        let id = ledger
+            .post(funding(400_000), Stamps::new(day(12), day(12)))
+            .expect("stamps that do not run backwards");
+
+        let reversal = ledger
+            .reverse(id, correction(), Stamps::new(day(12), day(21)))
+            .expect("a normal entry to reverse");
+
+        assert_eq!(
+            ledger.stamps(&reversal),
+            Some(Stamps::new(day(12), day(21)))
+        );
+    }
+
+    #[test]
+    fn should_hide_a_correction_from_anyone_asking_before_it_was_known() {
+        // The two features meeting. The funding stands as far as day 20 is
+        // concerned, because the correction had not been written yet — and it
+        // is undone for anyone asking from day 21 onwards, about the very
+        // same moment.
+        let mut ledger = Ledger::new();
+        let id = ledger
+            .post(funding(400_000), Stamps::new(day(12), day(12)))
+            .expect("stamps that do not run backwards");
+        ledger
+            .reverse(id, correction(), Stamps::new(day(12), day(21)))
+            .expect("a normal entry to reverse");
+
+        assert_eq!(
+            ledger.balance_as_of(&Account::GuildVault, day(12), day(20)),
+            Ok(Balance::Debit(Coin::from_coppers(400_000)))
+        );
+        assert_eq!(
+            ledger.balance_as_of(&Account::GuildVault, day(12), day(21)),
+            Ok(Balance::Nil)
+        );
+    }
+
+    #[test]
+    fn should_refuse_a_reversal_filed_behind_what_the_journal_knew() {
+        // reverse appends through post, so it inherits the rule rather than
+        // restating it.
+        let mut ledger = Ledger::new();
+        let id = ledger
+            .post(funding(400_000), Stamps::new(day(12), day(21)))
+            .expect("stamps that do not run backwards");
+
+        let refused = ledger.reverse(id, correction(), Stamps::new(day(12), day(20)));
+
+        assert_eq!(
+            refused,
+            Err(LedgerError::KnowledgeRunsBackwards {
+                recorded_at: day(20),
+                latest: day(21),
             })
         );
     }
@@ -538,12 +902,10 @@ mod tests {
         // caller asking for this is one who has lost track of it — telling
         // them only "no" leaves them no way to go and look.
         let mut ledger = Ledger::new();
-        let id = ledger.post(funding(400_000));
-        let reversal = ledger
-            .reverse(id.clone(), correction())
-            .expect("a normal entry to reverse");
+        let id = post(&mut ledger, funding(400_000));
+        let reversal = reverse(&mut ledger, id.clone()).expect("a normal entry to reverse");
 
-        let refused = ledger.reverse(id.clone(), correction());
+        let refused = reverse(&mut ledger, id.clone());
 
         assert_eq!(
             refused,
@@ -561,12 +923,10 @@ mod tests {
         // posted in error is corrected by posting the original again, which
         // reads honestly in the journal.
         let mut ledger = Ledger::new();
-        let id = ledger.post(funding(400_000));
-        let reversal = ledger
-            .reverse(id, correction())
-            .expect("a normal entry to reverse");
+        let id = post(&mut ledger, funding(400_000));
+        let reversal = reverse(&mut ledger, id).expect("a normal entry to reverse");
 
-        let refused = ledger.reverse(reversal.clone(), correction());
+        let refused = reverse(&mut ledger, reversal.clone());
 
         assert_eq!(refused, Err(LedgerError::UnableToReverse(reversal)));
     }
@@ -576,13 +936,11 @@ mod tests {
         // A refusal that had already pushed an entry would leave the journal
         // holding half a correction.
         let mut ledger = Ledger::new();
-        let id = ledger.post(funding(400_000));
-        let reversal = ledger
-            .reverse(id, correction())
-            .expect("a normal entry to reverse");
+        let id = post(&mut ledger, funding(400_000));
+        let reversal = reverse(&mut ledger, id).expect("a normal entry to reverse");
 
-        let _ = ledger.reverse(reversal, correction());
-        let _ = ledger.reverse(EntryId::sequential(99), correction());
+        let _ = reverse(&mut ledger, reversal);
+        let _ = reverse(&mut ledger, EntryId::sequential(99));
 
         assert_eq!(ledger.len(), 2);
     }
@@ -592,16 +950,138 @@ mod tests {
         // Reversing the first entry must undo the first entry, not the last
         // one posted or the one the id happens to sit next to.
         let mut ledger = Ledger::new();
-        let first = ledger.post(funding(400_000));
-        ledger.post(funding(1_000));
+        let first = post(&mut ledger, funding(400_000));
+        post(&mut ledger, funding(1_000));
 
-        ledger
-            .reverse(first, correction())
-            .expect("a normal entry to reverse");
+        reverse(&mut ledger, first).expect("a normal entry to reverse");
 
         assert_eq!(
             ledger.balance(&Account::GuildVault),
             Ok(Balance::Debit(Coin::from_coppers(1_000)))
+        );
+    }
+
+    #[test]
+    fn should_ignore_entries_that_had_not_happened_yet() {
+        // The "what was true" axis on its own. Both entries are known by the
+        // time of the asking; only one of them had happened.
+        let mut ledger = Ledger::new();
+        ledger
+            .post(funding(400_000), Stamps::new(day(3), day(3)))
+            .expect("stamps that do not run backwards");
+        ledger
+            .post(funding(1_000), Stamps::new(day(20), day(20)))
+            .expect("stamps that do not run backwards");
+
+        let as_of_day_ten = ledger.balance_as_of(&Account::GuildVault, day(10), day(30));
+
+        assert_eq!(
+            as_of_day_ten,
+            Ok(Balance::Debit(Coin::from_coppers(400_000)))
+        );
+    }
+
+    #[test]
+    fn should_ignore_entries_the_guild_had_not_yet_learned_of() {
+        // The "what did we know" axis on its own. Both entries had happened
+        // by the moment being asked about; only one had been written down.
+        let mut ledger = Ledger::new();
+        ledger
+            .post(funding(400_000), Stamps::new(day(3), day(3)))
+            .expect("stamps that do not run backwards");
+        ledger
+            .post(funding(1_000), Stamps::new(day(4), day(20)))
+            .expect("stamps that do not run backwards");
+
+        let as_known_on_day_ten = ledger.balance_as_of(&Account::GuildVault, day(30), day(10));
+
+        assert_eq!(
+            as_known_on_day_ten,
+            Ok(Balance::Debit(Coin::from_coppers(400_000)))
+        );
+    }
+
+    #[test]
+    fn should_count_an_entry_on_the_very_moment_it_happened_and_was_learned() {
+        // Both bounds are inclusive. Asking "as of day 12" includes what
+        // happened on day 12 — a reader who has to remember an off-by-one
+        // will get it wrong, and a ledger is not the place for that.
+        let mut ledger = Ledger::new();
+        ledger
+            .post(funding(400_000), Stamps::new(day(12), day(21)))
+            .expect("stamps that do not run backwards");
+
+        assert_eq!(
+            ledger.balance_as_of(&Account::GuildVault, day(12), day(21)),
+            Ok(Balance::Debit(Coin::from_coppers(400_000)))
+        );
+        assert_eq!(
+            ledger.balance_as_of(&Account::GuildVault, day(11), day(21)),
+            Ok(Balance::Nil)
+        );
+        assert_eq!(
+            ledger.balance_as_of(&Account::GuildVault, day(12), day(20)),
+            Ok(Balance::Nil)
+        );
+    }
+
+    #[test]
+    fn should_agree_with_balance_when_asked_about_the_present() {
+        // The plain balance is the bitemporal one asked at the far end of
+        // both axes. If these two ever disagree, one of them is folding a
+        // different set of postings.
+        let mut ledger = Ledger::new();
+        ledger
+            .post(funding(400_000), Stamps::new(day(3), day(3)))
+            .expect("stamps that do not run backwards");
+        ledger
+            .post(funding(1_000), Stamps::new(day(12), day(21)))
+            .expect("stamps that do not run backwards");
+
+        let latest = WorldInstant::from_seconds_since_founding(u64::MAX);
+
+        assert_eq!(
+            ledger.balance_as_of(&Account::GuildVault, latest, latest),
+            ledger.balance(&Account::GuildVault)
+        );
+    }
+
+    #[test]
+    fn should_report_a_backdated_death_benefit_only_once_the_guild_knows_of_it() {
+        // The demo. A party marches on day 3 with 400,000 in escrow. An
+        // adventurer dies on day 12, but the news walks home at the speed of
+        // the survivors and does not arrive until day 21.
+        //
+        // Ask what the estate was owed on day 12 and the answer depends
+        // entirely on *when you ask from*. Both answers are correct. That is
+        // the whole point of keeping two clocks: "what was true" and "what did
+        // we know" are different questions, and a ledger with one timestamp
+        // can only answer one of them.
+        let alder = adventurer("alder-quill");
+        let estate = Account::EstatePayable(alder);
+        let mut ledger = Ledger::new();
+
+        ledger
+            .post(funding(400_000), Stamps::new(day(3), day(3)))
+            .expect("stamps that do not run backwards");
+        ledger
+            .post(
+                entry(vec![
+                    debit(patron(), 100_000),
+                    credit(estate.clone(), 100_000),
+                ]),
+                Stamps::new(day(12), day(21)),
+            )
+            .expect("stamps that do not run backwards");
+
+        let as_the_guild_knew_it_on_day_twelve = ledger.balance_as_of(&estate, day(12), day(12));
+        let as_the_guild_knows_it_on_day_twentyone =
+            ledger.balance_as_of(&estate, day(12), day(21));
+
+        assert_eq!(as_the_guild_knew_it_on_day_twelve, Ok(Balance::Nil));
+        assert_eq!(
+            as_the_guild_knows_it_on_day_twentyone,
+            Ok(Balance::Credit(Coin::from_coppers(100_000)))
         );
     }
 
@@ -655,7 +1135,7 @@ mod tests {
             let mut ledger = Ledger::new();
             let ids: Vec<EntryId> = parts
                 .iter()
-                .map(|part| ledger.post(build(part, &pool)))
+                .map(|part| post(&mut ledger, build(part, &pool)))
                 .collect();
 
             let mut debits: u128 = 0;
@@ -700,7 +1180,7 @@ mod tests {
             let pool = pool();
             let mut ledger = Ledger::new();
             for part in &parts {
-                ledger.post(build(part, &pool));
+                post(&mut ledger, build(part, &pool));
             }
 
             let mut debits: u128 = 0;
@@ -736,15 +1216,77 @@ mod tests {
             let mut ledger = Ledger::new();
             let ids: Vec<EntryId> = parts
                 .iter()
-                .map(|part| ledger.post(build(part, &pool)))
+                .map(|part| post(&mut ledger, build(part, &pool)))
                 .collect();
 
             for id in ids {
-                ledger.reverse(id, narrative()).expect("a normal entry to reverse");
+                ledger
+                    .reverse(id, narrative(), whenever())
+                    .expect("a normal entry to reverse");
             }
 
             for account in ledger.accounts() {
                 prop_assert_eq!(ledger.balance(account), Ok(Balance::Nil));
+            }
+        }
+
+
+        /// Asked at the far end of both axes, the bitemporal balance is the
+        /// plain one.
+        ///
+        /// The two folds walk different iterators, so this is what keeps them
+        /// from drifting: a filter that dropped an entry it should have kept,
+        /// or a `postings_as_of` that visited records in a different order,
+        /// shows up here across arbitrary journals rather than in the one
+        /// shape an example test happens to use.
+        #[test]
+        fn should_answer_as_the_plain_balance_when_asked_at_the_end_of_both_axes(
+            parts in proptest::collection::vec((entry_parts(), 1_u64..50, 0_u64..50), 0..8)
+        ) {
+            let pool = pool();
+            let mut ledger = Ledger::new();
+            let mut recorded = 0_u64;
+            for (part, occurred, gap) in &parts {
+                recorded += gap;
+                ledger
+                    .post(build(part, &pool), Stamps::new(day(*occurred), day(recorded)))
+                    .expect("recordings that never run backwards");
+            }
+
+            let ever = WorldInstant::from_seconds_since_founding(u64::MAX);
+            for account in ledger.accounts() {
+                prop_assert_eq!(
+                    ledger.balance_as_of(account, ever, ever),
+                    ledger.balance(account)
+                );
+            }
+        }
+
+        /// Before the journal begins, every account is nil.
+        ///
+        /// Every entry here happens and is recorded strictly after the
+        /// Founding, so asking about the Founding itself must see none of
+        /// them — the accounts exist, and nothing has reached them yet. This
+        /// is the property an off-by-one in either bound breaks.
+        #[test]
+        fn should_report_nil_everywhere_when_asked_before_anything_happened(
+            parts in proptest::collection::vec((entry_parts(), 1_u64..50, 1_u64..50), 0..8)
+        ) {
+            let pool = pool();
+            let mut ledger = Ledger::new();
+            let mut recorded = 0_u64;
+            for (part, occurred, gap) in &parts {
+                recorded += gap;
+                ledger
+                    .post(build(part, &pool), Stamps::new(day(*occurred), day(recorded)))
+                    .expect("recordings that never run backwards");
+            }
+
+            for account in ledger.accounts() {
+                prop_assert_eq!(
+                    ledger.balance_as_of(account, WorldInstant::FOUNDING, WorldInstant::FOUNDING),
+                    Ok(Balance::Nil)
+                );
             }
         }
 

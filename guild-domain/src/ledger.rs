@@ -9,6 +9,7 @@
 //! | [`narrative`]     | [`Narrative`], what an entry says it was for             |
 //! | [`journal_entry`] | [`JournalEntry`], a set of postings that must balance    |
 //! | [`balance`]       | [`Balance`], what an account is worth and which way      |
+//! | [`stamps`]        | [`Stamps`], when an entry happened and when it was known |
 //! | [`journal`]       | [`Ledger`], the append-only record of every entry        |
 //!
 //! Quest, Party, and Escrow are the *story* — who agreed to what, who served
@@ -27,6 +28,15 @@
 //! [`JournalEntry::new`] is the only way to build an entry and it refuses
 //! anything unbalanced, no sequence of entries can add up to books that do not
 //! balance.
+//!
+//! # Two clocks on everything
+//!
+//! Every journal row carries [`Stamps`] — when it happened, and when the
+//! Guild found out. A party reports a day-12 death when it walks back through
+//! the gate on day 21, so those are routinely weeks apart, and
+//! [`Ledger::balance_as_of`](journal::Ledger::balance_as_of) can be asked
+//! about either axis. "What was true" and "what did we know" are different
+//! questions and the books answer both.
 //!
 //! # Nothing is ever unwritten
 //!
@@ -51,11 +61,13 @@ pub mod journal;
 pub mod journal_entry;
 pub mod narrative;
 pub mod posting;
+pub mod stamps;
 
 pub use account::{Account, AccountKind};
 pub use balance::Balance;
 pub use direction::Direction;
-pub use journal::Ledger;
+pub use journal::{Ledger, Record};
 pub use journal_entry::{JournalEntry, LedgerError, NormalEntry, ReversalEntry};
 pub use narrative::{InvalidNarrative, Narrative};
 pub use posting::{Posting, PostingError};
+pub use stamps::Stamps;
