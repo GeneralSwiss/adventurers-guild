@@ -52,6 +52,7 @@ use guild_domain::ledger::{
     Narrative, NormalEntry, Posting, PostingError, Record, ReversalEntry, Stamps,
 };
 use guild_domain::money::{Coin, InvalidShare, MoneyError, Share, Shares};
+use guild_domain::quest::HazardTier;
 use guild_domain::time::{Duration, TimeError, WorldInstant};
 
 /// Compiles only for a `T` that can be moved to another thread, shared with
@@ -93,6 +94,11 @@ fn every_time_type_crosses_thread_boundaries() {
     assert_send_sync::<WorldInstant>();
 
     assert_send_sync::<TimeError>();
+}
+
+#[test]
+fn every_quest_type_crosses_thread_boundaries() {
+    assert_send_sync::<HazardTier>();
 }
 
 #[test]

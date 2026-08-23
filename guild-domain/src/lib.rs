@@ -24,7 +24,7 @@
 //! | [`money`]     | M0        | `Coin`, `Share`, allocation without loss       |
 //! | [`time`]      | M0        | `WorldInstant`, `Duration`                     |
 //! | [`ledger`]    | M1        | Accounts, and the postings that must balance   |
-//! | `quest`       | M2        | Bounty escrow and the quest lifecycle          |
+//! | [`quest`]     | M2        | Bounty escrow and the quest lifecycle          |
 //! | `party`       | M3        | Membership as intervals over time              |
 //! | `settlement`  | M4        | Fee schedules, split policies, payout          |
 //! | `event`       | —         | Domain events emitted by the aggregates        |
@@ -32,4 +32,5 @@
 pub mod identifiers;
 pub mod ledger;
 pub mod money;
+pub mod quest;
 pub mod time;
