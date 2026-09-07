@@ -190,7 +190,8 @@ impl std::fmt::Display for Stage {
 pub struct QuestId(uuid::Uuid);
 
 impl QuestId {
-    /// Get a new QuestId
+    /// Get a new `QuestId`
+    #[must_use]
     pub fn new() -> Self {
         QuestId(uuid::Uuid::new_v4())
     }
