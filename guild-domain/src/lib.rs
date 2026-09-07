@@ -28,6 +28,8 @@
 //! | `party`       | M3        | Membership as intervals over time              |
 //! | `settlement`  | M4        | Fee schedules, split policies, payout          |
 //! | `event`       | —         | Domain events emitted by the aggregates        |
+#![warn(clippy::pedantic)]
+#![deny(clippy::complexity, clippy::suspicious)]
 
 pub mod identifiers;
 pub mod ledger;

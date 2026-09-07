@@ -36,11 +36,13 @@ impl Share {
     }
 
     /// The numerator, after reduction.
+    #[must_use]
     pub fn numerator(&self) -> u32 {
         *self.0.numer()
     }
 
     /// The denominator, after reduction. Never zero.
+    #[must_use]
     pub fn denominator(&self) -> u32 {
         *self.0.denom()
     }
@@ -79,10 +81,19 @@ impl Shares {
 impl IntoIterator for Shares {
     type Item = Share;
 
-    type IntoIter = std::vec::IntoIter<Self::Item>;
+    type IntoIter = std::vec::IntoIter<Share>;
 
     fn into_iter(self) -> Self::IntoIter {
         self.0.into_iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a Shares {
+    type Item = &'a Share;
+    type IntoIter = std::slice::Iter<'a, Share>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter()
     }
 }
 
