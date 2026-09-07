@@ -11,6 +11,7 @@
 //! Every type is re-exported here, so `quest::HazardTier` is the path to
 //! prefer over `quest::hazard_tier::HazardTier`.
 
+pub mod escrow;
 pub mod hazard_tier;
 
 pub use hazard_tier::HazardTier;
