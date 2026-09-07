@@ -11,3 +11,4 @@ rust-version = "1.85"
 thiserror = "2"
 proptest = "1"
 num-rational = "0.4.2"
+uuid = { version = "1.26.0", features = ["v4"] }

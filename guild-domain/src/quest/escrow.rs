@@ -77,22 +77,65 @@
 //! is the invariant.
 
 use core::fmt::Formatter;
+use std::fmt::Display;
 
 use crate::money::{Coin, MoneyError};
 
 /// Funds the Guild holds against a quest, from the patron's payment to the party's payout.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Escrow {
     state: State,
 }
 
 /// The escrow's whole lifecycle, private so no caller can name or match a state.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum State {
     Unfunded,
     Funded(Coin),
     Closed(Settlement),
 }
 
+/// Which state an escrow is in, without what that state holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Stage {
+    /// Holding no purse yet.
+    Unfunded,
+    /// Holding a bounty.
+    Funded,
+    /// Has let its bounty go.
+    Closed,
+}
+
+impl std::fmt::Display for Stage {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        let variant = match self {
+            Stage::Unfunded => "unfunded",
+            Stage::Funded => "funded",
+            Stage::Closed => "closed",
+        };
+
+        f.write_str(variant)
+    }
+}
+
+impl State {
+    /// Which stage this state belongs to.
+    fn stage(&self) -> Stage {
+        match self {
+            State::Unfunded => Stage::Unfunded,
+            State::Funded(_) => Stage::Funded,
+            State::Closed(_) => Stage::Closed,
+        }
+    }
+}
+
 impl Escrow {
+    /// Which stage the escrow is in.
+    #[must_use]
+    pub fn stage(&self) -> Stage {
+        self.state.stage()
+    }
+
     /// Opens an escrow that holds nothing yet.
     #[must_use]
     pub fn unfunded() -> Self {
@@ -198,7 +241,17 @@ impl Escrow {
     }
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+impl Display for Escrow {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self.state {
+            State::Unfunded => write!(f, "unfunded escrow"),
+            State::Funded(coin) => write!(f, "funded escrow with balance {coin}"),
+            State::Closed(settlement) => write!(f, "{settlement} escrow"),
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 /// How an escrow was closed, which is the one thing a closed escrow still knows.
 pub enum Settlement {
     /// The bounty went out to the party.
@@ -207,7 +260,7 @@ pub enum Settlement {
     Refunded,
 }
 
-impl std::fmt::Display for Settlement {
+impl Display for Settlement {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             Settlement::Dispersed => write!(f, "Dispersed"),
@@ -492,6 +545,100 @@ mod tests {
             error.to_string(),
             "the bounty has already been refunded to the patron"
         );
+    }
+
+    // Paying out only part of what is held.
+
+    /// The escrow stays open holding the remainder. This is the path that once
+    /// paid out and left the full balance in place, so the same bounty could be
+    /// dispersed without limit.
+    #[test]
+    fn should_pay_out_part_of_a_bounty_and_keep_the_rest() {
+        let mut escrow = funded_escrow();
+
+        let paid = escrow.disperse(Coin::from_coppers(30));
+
+        assert_eq!(paid, Ok(Coin::from_coppers(30)));
+        assert_eq!(escrow.balance(), Some(Coin::from_coppers(31_177)));
+        assert_eq!(escrow.settlement(), None);
+    }
+
+    #[test]
+    fn should_refuse_to_pay_out_more_than_it_holds() {
+        let mut escrow = funded_escrow();
+
+        let paid = escrow.disperse(Coin::from_coppers(u64::MAX));
+
+        assert_eq!(
+            paid,
+            Err(EscrowError::DispursementError(
+                MoneyError::InsufficientFunds {
+                    held: bounty(),
+                    withdrawal: Coin::from_coppers(u64::MAX),
+                }
+            ))
+        );
+        assert_eq!(escrow.balance(), Some(bounty()));
+    }
+
+    // Opening one that is already funded.
+
+    #[test]
+    fn should_open_an_escrow_already_holding_a_bounty() {
+        let escrow = Escrow::open_escrow_with_funds(bounty());
+
+        assert_eq!(escrow.balance(), Some(bounty()));
+        assert_eq!(escrow.stage(), Stage::Funded);
+    }
+
+    #[test]
+    fn should_refuse_to_fund_an_escrow_that_was_refunded() {
+        let mut escrow = funded_escrow();
+        let _ = escrow.refund();
+
+        let funded = escrow.fund(bounty());
+
+        assert_eq!(funded, Err(EscrowError::AlreadyRefunded));
+    }
+
+    // Which stage it is in.
+
+    #[test]
+    fn should_report_which_stage_it_is_in() {
+        let mut settled = funded_escrow();
+        let _ = settled.refund();
+
+        assert_eq!(Escrow::unfunded().stage(), Stage::Unfunded);
+        assert_eq!(funded_escrow().stage(), Stage::Funded);
+        assert_eq!(settled.stage(), Stage::Closed);
+    }
+
+    #[test]
+    fn should_render_each_stage_as_a_clerk_would_say_it() {
+        assert_eq!(Stage::Unfunded.to_string(), "unfunded");
+        assert_eq!(Stage::Funded.to_string(), "funded");
+        assert_eq!(Stage::Closed.to_string(), "closed");
+    }
+
+    // How an escrow and its settlement read.
+
+    #[test]
+    fn should_render_an_escrow_by_what_it_holds() {
+        let mut refunded = funded_escrow();
+        let _ = refunded.refund();
+
+        assert_eq!(Escrow::unfunded().to_string(), "unfunded escrow");
+        assert_eq!(
+            funded_escrow().to_string(),
+            "funded escrow with balance 3g 12s 7c"
+        );
+        assert_eq!(refunded.to_string(), "Refunded escrow");
+    }
+
+    #[test]
+    fn should_render_how_it_was_settled() {
+        assert_eq!(Settlement::Dispersed.to_string(), "Dispersed");
+        assert_eq!(Settlement::Refunded.to_string(), "Refunded");
     }
 
     proptest! {

@@ -4,18 +4,20 @@
 //! |-----------------|--------------------------------------------------------|
 //! | [`hazard_tier`] | [`HazardTier`], how dangerous a quest is               |
 //! | [`escrow`]      | [`Escrow`], the bounty from payment to payout          |
-//! | [`state`]       | [`Quest`], where a quest stands and what it may do next |
+//! | [`lifecycle`]   | [`Quest`], where it stands and what it may do next     |
 //!
-//! The aggregate that binds a tier, an escrow and a state together arrives with
-//! the rest of M2 — see `backlog/BACKLOG.md`.
+//! Types are re-exported here, so `quest::HazardTier` is the path to prefer
+//! over `quest::hazard_tier::HazardTier`.
 //!
-//! Every type is re-exported here, so `quest::HazardTier` is the path to
-//! prefer over `quest::hazard_tier::HazardTier`.
+//! `Stage` is the one exception. An escrow has one and so does a quest, and two
+//! different things cannot share a name at this level — so the quest's
+//! [`Stage`] is re-exported and the escrow's stays `escrow::Stage`.
 
+pub mod client;
 pub mod escrow;
 pub mod hazard_tier;
-pub mod state;
+pub mod lifecycle;
 
 pub use escrow::{Escrow, EscrowError, Settlement};
 pub use hazard_tier::HazardTier;
-pub use state::{Quest, QuestError, State};
+pub use lifecycle::{Quest, QuestError, Stage};
