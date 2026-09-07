@@ -8,9 +8,9 @@
 //!
 //! ```
 //! use guild_domain::party::Party;
-//! use guild_domain::quest::{Escrow, Quest};
+//! use guild_domain::quest::{Escrow, Quest, client::Client, HazardTier};
 //!
-//! let mut quest = Quest::new();
+//! let mut quest = Quest::new(Client, HazardTier::Errand);
 //! quest.post(Escrow::unfunded())?;
 //! quest.accept(Party::new())?;
 //! quest.begin()?;
@@ -785,7 +785,7 @@ mod tests {
                 hazard_tier: HazardTier::Errand
             }
             .to_string(),
-            "a draft"
+            "a draft of a quest commissioned by the client"
         );
         assert_eq!(
             State::Posted {
@@ -794,7 +794,7 @@ mod tests {
                 client: Client
             }
             .to_string(),
-            "posted backed by unfunded escrow"
+            "posted backed by unfunded escrow and commissioned by the client"
         );
         assert_eq!(
             State::Accepted {
