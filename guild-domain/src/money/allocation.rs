@@ -8,6 +8,14 @@
 //! The weights come in as [`Shares`], which has already proved that they claim
 //! the whole purse — see [that module](super::share) for why the invariant
 //! lives in the type rather than in a check here.
+//!
+//! Nothing about *money* can go wrong here, then. The [`Result`] this module
+//! returns reports arithmetic rather than domain failure: the narrowing
+//! conversions are checked rather than cast, so a width that was wrong says so
+//! instead of silently truncating a purse. See
+//! [`AllocationError`] for why that error is unreachable for [`Coin`].
+
+use std::num::TryFromIntError;
 
 use super::coin::Coin;
 use super::share::Shares;
@@ -18,7 +26,14 @@ use super::share::Shares;
 /// the parts must not create or destroy any of them.
 pub trait Allocate: Sized {
     /// Splits `self` across `shares`, one part per share, in order.
-    fn allocate(self, shares: Shares) -> Vec<Self>;
+    ///
+    /// # Errors
+    ///
+    /// [`AllocationError::IntegerOverflow`] if a part or the spare count does
+    /// not fit the width the implementing type counts in. An implementation is
+    /// expected to bound both by construction, so this reports a broken
+    /// assumption rather than an outcome a caller can provoke.
+    fn allocate(self, shares: Shares) -> Result<Vec<Self>, AllocationError>;
 }
 
 impl Allocate for Coin {
@@ -29,14 +44,31 @@ impl Allocate for Coin {
     /// first, ties going to the earlier position. The parts sum to the
     /// original purse exactly.
     ///
-    /// # Why this cannot fail
+    /// # Errors
     ///
-    /// The one thing that could go wrong — weights that do not claim the whole
-    /// purse — was ruled out by [`Shares::new`], so there is nothing left to
-    /// report. A `Result` whose error can never be produced would force every
-    /// call site to handle a case that does not exist; the [`coin`
-    /// module](super::coin) makes the same argument about construction.
-    fn allocate(self, shares: Shares) -> Vec<Coin> {
+    /// [`AllocationError::IntegerOverflow`] if either narrowing conversion
+    /// fails. Neither can, for any purse this type can hold: a share never
+    /// exceeds one, so a part is at most the whole purse and fits the `u64` it
+    /// came from, and the spare is smaller than the number of shares, which is
+    /// already a `usize`. Both bounds are argued at the conversions themselves.
+    ///
+    /// # Why an unreachable error is reported at all
+    ///
+    /// The domain failure this operation might have had — weights that do not
+    /// claim the whole purse — was ruled out by [`Shares::new`]. What is left
+    /// is arithmetic, and the [`coin` module](super::coin) argues against
+    /// exactly this: a `Result` whose error cannot be produced makes every call
+    /// site handle a case that does not exist, and teaches readers to skip past
+    /// the `?`.
+    ///
+    /// It is kept because the alternative is worse in the one place it counts.
+    /// The unchecked form is `as u64`, and an `as` cast that is wrong wraps in
+    /// silence — it would hand back a purse smaller than the one that went in,
+    /// which is the single failure this module exists to prevent. A checked
+    /// conversion that is wrong says so. The cost is a `?` at every call site;
+    /// the benefit is that the proof above is enforced rather than merely
+    /// written down.
+    fn allocate(self, shares: Shares) -> Result<Vec<Coin>, AllocationError> {
         let held = u128::from(self.as_coppers());
 
         // Multiply before dividing. Flooring first would discard the fraction this
@@ -45,19 +77,24 @@ impl Allocate for Coin {
         // Each share carries its own denominator, so the remainder is kept
         // beside it: on its own the integer is meaningless, because a
         // remainder of 1 is half a copper under 1/2 and a quarter under 1/4.
-        let (mut parts, remainders): (Vec<u64>, Vec<(u128, u128)>) = shares
+        // `collect` into a `Result` short-circuits on the first error. Iterating
+        // the `Result`s instead — `flat_map`, `flatten`, `filter_map` — would
+        // silently drop the failing share and hand back a short vector.
+        let measured: Vec<(u64, (u128, u128))> = shares
             .iter()
             .map(|share| {
                 let denominator = u128::from(share.denominator());
                 let exact = held * u128::from(share.numerator());
                 // A share never exceeds one, so `exact / denominator <= held`
-                // and the cast is exact.
-                (
-                    (exact / denominator) as u64,
+                // and the conversion cannot fail.
+                Ok((
+                    u64::try_from(exact / denominator)?,
                     (exact % denominator, denominator),
-                )
+                ))
             })
-            .unzip();
+            .collect::<Result<_, AllocationError>>()?;
+
+        let (mut parts, remainders): (Vec<u64>, Vec<(u128, u128)>) = measured.into_iter().unzip();
 
         // Every floor discarded strictly less than one copper, so across n shares
         // the shortfall is strictly less than n. One spare copper each covers it,
@@ -78,12 +115,26 @@ impl Allocate for Coin {
                 .then_with(|| left.cmp(&right))
         });
 
-        for &index in order.iter().take(spare as usize) {
+        for &index in order.iter().take(usize::try_from(spare)?) {
             parts[index] += 1;
         }
 
-        parts.into_iter().map(Coin::from_coppers).collect()
+        Ok(parts.into_iter().map(Coin::from_coppers).collect())
     }
+}
+
+/// The ways an allocation can fail.
+///
+/// One variant, and it is unreachable for [`Coin`] — see
+/// [`Coin::allocate`](Allocate::allocate) for the bounds that rule it out. It
+/// exists so the narrowing conversions inside the algorithm are checked rather
+/// than cast, since a cast that is wrong loses money quietly.
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
+pub enum AllocationError {
+    /// A part of the purse, or the count of spare coppers, did not fit the
+    /// narrower integer it was converted to.
+    #[error("integer overflow")]
+    IntegerOverflow(#[from] TryFromIntError),
 }
 
 #[cfg(test)]
@@ -91,6 +142,15 @@ mod tests {
     use super::*;
     use crate::money::share::Share;
     use proptest::prelude::*;
+
+    /// Allocates, asserting the bound the algorithm relies on: a share never
+    /// exceeds one, so no part can outgrow the purse it was cut from and the
+    /// narrowing conversions inside `allocate` cannot fail.
+    fn allocated(purse: Coin, shares: Shares) -> Vec<Coin> {
+        purse
+            .allocate(shares)
+            .expect("a share never exceeds one, so every part fits the purse")
+    }
 
     fn coppers(parts: &[Coin]) -> Vec<u64> {
         parts.iter().map(|part| part.as_coppers()).collect()
@@ -110,7 +170,7 @@ mod tests {
 
     #[test]
     fn should_split_a_purse_that_divides_evenly() {
-        let parts = Coin::from_coppers(100).allocate(shares_of(&[1, 1, 1, 1]));
+        let parts = allocated(Coin::from_coppers(100), shares_of(&[1, 1, 1, 1]));
 
         assert_eq!(coppers(&parts), vec![25, 25, 25, 25]);
     }
@@ -119,7 +179,7 @@ mod tests {
     fn should_hand_each_spare_copper_to_the_largest_remainder() {
         // 10c at 1:2:4 — exact shares 1.428, 2.857, 5.714. The floors hand out
         // 8, so 2 coppers are spare, and they go to the two largest fractions.
-        let parts = Coin::from_coppers(10).allocate(shares_of(&[1, 2, 4]));
+        let parts = allocated(Coin::from_coppers(10), shares_of(&[1, 2, 4]));
 
         assert_eq!(coppers(&parts), vec![1, 3, 6]);
     }
@@ -128,14 +188,14 @@ mod tests {
     fn should_break_a_tie_by_position() {
         // Three equal shares leave three equal remainders. Position decides,
         // so the result is stable rather than merely correct.
-        let parts = Coin::from_coppers(5).allocate(shares_of(&[1, 1, 1]));
+        let parts = allocated(Coin::from_coppers(5), shares_of(&[1, 1, 1]));
 
         assert_eq!(coppers(&parts), vec![2, 2, 1]);
     }
 
     #[test]
     fn should_allocate_the_purse_from_the_draft() {
-        let parts = Coin::from_coppers(5).allocate(shares_of(&[1, 3, 5]));
+        let parts = allocated(Coin::from_coppers(5), shares_of(&[1, 3, 5]));
 
         assert_eq!(coppers(&parts), vec![0, 2, 3]);
     }
@@ -150,8 +210,10 @@ mod tests {
             Share::new(1, 4).expect("a non-zero denominator"),
             Share::new(1, 2).expect("a non-zero denominator"),
         ];
-        let parts = Coin::from_coppers(1)
-            .allocate(Shares::new(&shares).expect("quarters and a half sum to one"));
+        let parts = allocated(
+            Coin::from_coppers(1),
+            Shares::new(&shares).expect("quarters and a half sum to one"),
+        );
 
         assert_eq!(coppers(&parts), vec![0, 0, 1]);
     }
@@ -165,8 +227,8 @@ mod tests {
         // positional puts that choice in the caller's hands.
         let purse = Coin::from_coppers(3);
 
-        let first = purse.allocate(shares_of(&[1, 3, 2]));
-        let reordered = purse.allocate(shares_of(&[3, 1, 2]));
+        let first = allocated(purse, shares_of(&[1, 3, 2]));
+        let reordered = allocated(purse, shares_of(&[3, 1, 2]));
 
         assert_eq!(coppers(&first), vec![1, 1, 1]);
         assert_eq!(coppers(&reordered), vec![2, 0, 1]);
@@ -174,14 +236,14 @@ mod tests {
 
     #[test]
     fn should_give_nothing_away_from_an_empty_purse() {
-        let parts = Coin::ZERO.allocate(shares_of(&[1, 1]));
+        let parts = allocated(Coin::ZERO, shares_of(&[1, 1]));
 
         assert_eq!(coppers(&parts), vec![0, 0]);
     }
 
     #[test]
     fn should_not_overflow_on_a_purse_near_the_maximum() {
-        let parts = Coin::from_coppers(u64::MAX).allocate(shares_of(&[1, 1]));
+        let parts = allocated(Coin::from_coppers(u64::MAX), shares_of(&[1, 1]));
 
         assert_eq!(coppers(&parts).iter().sum::<u64>(), u64::MAX);
     }
@@ -194,8 +256,10 @@ mod tests {
             Share::new(1, u32::MAX).expect("a non-zero denominator"),
             Share::new(u32::MAX - 1, u32::MAX).expect("a non-zero denominator"),
         ];
-        let parts = Coin::from_coppers(u64::MAX)
-            .allocate(Shares::new(&shares).expect("the pair sums to one"));
+        let parts = allocated(
+            Coin::from_coppers(u64::MAX),
+            Shares::new(&shares).expect("the pair sums to one"),
+        );
 
         assert_eq!(coppers(&parts).iter().sum::<u64>(), u64::MAX);
     }
@@ -208,9 +272,7 @@ mod tests {
             coppers_held in 0..=u64::MAX,
             weights in prop::collection::vec(1u32..=1000, 1..=20),
         ) {
-            let parts = Coin::from_coppers(coppers_held)
-                .allocate(shares_of(&weights))
-                ;
+            let parts = allocated(Coin::from_coppers(coppers_held), shares_of(&weights));
 
             prop_assert_eq!(
                 parts.iter().map(|part| part.as_coppers()).sum::<u64>(),
@@ -225,9 +287,7 @@ mod tests {
             coppers_held in 0..=u64::MAX,
             weights in prop::collection::vec(1u32..=1000, 1..=20),
         ) {
-            let parts = Coin::from_coppers(coppers_held)
-                .allocate(shares_of(&weights))
-                ;
+            let parts = allocated(Coin::from_coppers(coppers_held), shares_of(&weights));
 
             prop_assert_eq!(parts.len(), weights.len());
         }
@@ -241,8 +301,8 @@ mod tests {
         ) {
             let purse = Coin::from_coppers(coppers_held);
 
-            let first = purse.allocate(shares_of(&weights));
-            let second = purse.allocate(shares_of(&weights));
+            let first = allocated(purse, shares_of(&weights));
+            let second = allocated(purse, shares_of(&weights));
 
             prop_assert_eq!(first, second);
         }
@@ -257,9 +317,7 @@ mod tests {
             coppers_held in 0..=u64::MAX,
             weights in prop::collection::vec(1u32..=1000, 1..=20),
         ) {
-            let parts = Coin::from_coppers(coppers_held)
-                .allocate(shares_of(&weights))
-                ;
+            let parts = allocated(Coin::from_coppers(coppers_held), shares_of(&weights));
 
             for (i, &left) in weights.iter().enumerate() {
                 for (j, &right) in weights.iter().enumerate() {
@@ -282,8 +340,8 @@ mod tests {
             let scaled: Vec<u32> = weights.iter().map(|weight| weight * scale).collect();
 
             prop_assert_eq!(
-                purse.allocate(shares_of(&weights)),
-                purse.allocate(shares_of(&scaled))
+                allocated(purse, shares_of(&weights)),
+                allocated(purse, shares_of(&scaled))
             );
         }
 
@@ -291,10 +349,9 @@ mod tests {
         #[test]
         fn should_give_a_lone_share_the_whole_purse(coppers_held in 0..=u64::MAX) {
             let whole = [Share::new(1, 1).expect("a non-zero denominator")];
+            let whole = Shares::new(&whole).expect("one whole share sums to one");
 
-            let parts = Coin::from_coppers(coppers_held)
-                .allocate(Shares::new(&whole).expect("one whole share sums to one"))
-                ;
+            let parts = allocated(Coin::from_coppers(coppers_held), whole);
 
             prop_assert_eq!(parts, vec![Coin::from_coppers(coppers_held)]);
         }
@@ -307,9 +364,7 @@ mod tests {
             weights in prop::collection::vec(1u32..=1000, 1..=20),
         ) {
             let total: u128 = weights.iter().map(|&w| u128::from(w)).sum();
-            let parts = Coin::from_coppers(coppers_held)
-                .allocate(shares_of(&weights))
-                ;
+            let parts = allocated(Coin::from_coppers(coppers_held), shares_of(&weights));
 
             for (part, &weight) in parts.iter().zip(weights.iter()) {
                 let floor = u128::from(coppers_held) * u128::from(weight) / total;

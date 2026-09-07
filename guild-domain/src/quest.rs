@@ -13,5 +13,6 @@
 
 pub mod escrow;
 pub mod hazard_tier;
+pub mod state;
 
 pub use hazard_tier::HazardTier;

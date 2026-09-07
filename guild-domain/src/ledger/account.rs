@@ -198,11 +198,12 @@ impl Account {
     /// assert!(matches!(Account::GuildVault.kind(), AccountKind::Asset));
     /// assert!(matches!(Account::GuildFeeIncome.kind(), AccountKind::Income));
     /// ```
+    #[must_use]
     pub fn kind(&self) -> AccountKind {
         match self {
-            Account::ClientEscrow { .. } => AccountKind::Liability,
-            Account::AdventurerPayable { .. } => AccountKind::Liability,
-            Account::EstatePayable { .. } => AccountKind::Liability,
+            Account::ClientEscrow { .. }
+            | Account::AdventurerPayable { .. }
+            | Account::EstatePayable { .. } => AccountKind::Liability,
             Account::GuildFeeIncome => AccountKind::Income,
             Account::GuildVault => AccountKind::Asset,
         }
@@ -224,6 +225,7 @@ impl Account {
     /// assert!(matches!(Account::GuildVault.normal_side(), Direction::Debit));
     /// assert!(matches!(Account::GuildFeeIncome.normal_side(), Direction::Credit));
     /// ```
+    #[must_use]
     pub fn normal_side(&self) -> Direction {
         match self.kind() {
             AccountKind::Asset | AccountKind::Expense => Direction::Debit,

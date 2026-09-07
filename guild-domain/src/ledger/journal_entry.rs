@@ -137,9 +137,9 @@ impl NormalEntry {
         let postings = self
             .postings
             .iter()
-            .map(|posting| posting.reverse())
+            .map(super::posting::Posting::reverse)
             .collect();
-        let narrative = narrative.reversal_of(original.clone());
+        let narrative = narrative.reversal_of(&original.clone());
         ReversalEntry {
             original,
             postings,

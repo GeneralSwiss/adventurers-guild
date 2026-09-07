@@ -84,13 +84,13 @@ impl Narrative {
     /// let reason: Narrative = "quest-1 never began".parse()?;
     ///
     /// assert_eq!(
-    ///     reason.reversal_of(EntryId::sequential(1)).as_str(),
+    ///     reason.reversal_of(&EntryId::sequential(1)).as_str(),
     ///     "reversal of entry-1: quest-1 never began",
     /// );
     /// # Ok::<(), guild_domain::ledger::InvalidNarrative>(())
     /// ```
     #[must_use]
-    pub fn reversal_of(self, original: crate::identifiers::EntryId) -> Self {
+    pub fn reversal_of(self, original: &crate::identifiers::EntryId) -> Self {
         let reversed = format!("reversal of {}: {}", original, self.0);
         Self(reversed)
     }
@@ -223,7 +223,7 @@ mod tests {
         // entry, and nobody reading the journal can tie the two together.
         let narrative = Narrative::from_str("settlement of quest-1").expect("a narrative");
 
-        let reversal = narrative.reversal_of(EntryId::sequential(7));
+        let reversal = narrative.reversal_of(&EntryId::sequential(7));
 
         assert_eq!(
             reversal.as_str(),
@@ -238,7 +238,7 @@ mod tests {
         // pins that what comes out would still be accepted going in.
         let reversal = Narrative::from_str("refund of quest-2")
             .expect("a narrative")
-            .reversal_of(EntryId::sequential(1));
+            .reversal_of(&EntryId::sequential(1));
 
         assert_eq!(Narrative::from_str(reversal.as_str()), Ok(reversal));
     }
@@ -250,8 +250,8 @@ mod tests {
         // nests rather than losing the inner entry's name.
         let twice = Narrative::from_str("settlement of quest-1")
             .expect("a narrative")
-            .reversal_of(EntryId::sequential(3))
-            .reversal_of(EntryId::sequential(4));
+            .reversal_of(&EntryId::sequential(3))
+            .reversal_of(&EntryId::sequential(4));
 
         assert_eq!(
             twice.as_str(),
