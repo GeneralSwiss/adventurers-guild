@@ -761,6 +761,29 @@ mod tests {
         assert_eq!(quest.stage(), Stage::Settled);
     }
 
+    // What the quest carries, and when it does not.
+
+    /// A draft has taken no coin yet, and from `InProgress` onward the state
+    /// carries none — see the note on the aggregate in the module docs.
+    #[test]
+    fn should_hold_no_bounty_before_it_is_posted_or_after_it_ends() {
+        assert_eq!(Quest::new(Client, HazardTier::Errand).bounty(), None);
+        assert_eq!(in_progress().bounty(), None);
+        assert_eq!(resolved().bounty(), None);
+        assert_eq!(abandoned().bounty(), None);
+        assert_eq!(settled().bounty(), None);
+    }
+
+    #[test]
+    fn should_name_no_party_until_one_takes_it() {
+        assert_eq!(Quest::new(Client, HazardTier::Errand).party(), None);
+        assert_eq!(posted().party(), None);
+        assert_eq!(in_progress().party(), None);
+        assert_eq!(resolved().party(), None);
+        assert_eq!(abandoned().party(), None);
+        assert_eq!(settled().party(), None);
+    }
+
     // How they read.
 
     #[test]
@@ -806,6 +829,9 @@ mod tests {
             .to_string(),
             "accepted"
         );
+        assert_eq!(State::InProgress.to_string(), "in progress");
+        assert_eq!(State::Resolved.to_string(), "resolved");
+        assert_eq!(State::Abandoned.to_string(), "abandoned");
         assert_eq!(State::Settled.to_string(), "settled");
     }
 
