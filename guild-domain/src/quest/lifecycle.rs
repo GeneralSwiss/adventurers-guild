@@ -69,7 +69,7 @@
 
 use crate::{
     party::Party,
-    quest::{Escrow, client::Client},
+    quest::{Escrow, HazardTier, client::Client},
 };
 use std::fmt::{self, Display, Formatter};
 
@@ -85,11 +85,15 @@ enum State {
     Draft {
         /// The client that owns the quest (?)
         client: Client,
+        /// The hazard Tier of the quest
+        hazard_tier: HazardTier,
     },
     /// On the board, waiting for a party to take it.
     Posted {
         /// The client that owns the quest.
         client: Client,
+        /// The hazard Tier of the quest
+        hazard_tier: HazardTier,
         /// The bounty held against the quest
         escrow: Escrow,
     },
@@ -97,6 +101,8 @@ enum State {
     Accepted {
         /// The client that owns the quest
         client: Client,
+        /// The hazard Tier of the quest
+        hazard_tier: HazardTier,
         /// The bounty held against the quest.
         escrow: Escrow,
         /// The party that took it on.
@@ -131,8 +137,8 @@ impl Display for State {
     /// reads `... quest that is in progress` rather than `... InProgress`.
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
-            State::Draft { client } => write!(f, "a draft of a quest commissioned by {client}"),
-            State::Posted { escrow, client } => {
+            State::Draft { client, .. } => write!(f, "a draft of a quest commissioned by {client}"),
+            State::Posted { escrow, client, .. } => {
                 write!(f, "posted backed by {escrow} and commissioned by {client}")
             }
             State::Accepted { .. } => write!(f, "accepted"),
@@ -179,6 +185,23 @@ impl std::fmt::Display for Stage {
     }
 }
 
+/// A quest id
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct QuestId(uuid::Uuid);
+
+impl QuestId {
+    /// Get a new QuestId
+    pub fn new() -> Self {
+        QuestId(uuid::Uuid::new_v4())
+    }
+}
+
+impl Default for QuestId {
+    fn default() -> Self {
+        QuestId::new()
+    }
+}
+
 /// A quest the Guild is hired to do, tracked through its lifecycle.
 ///
 /// The state is private: callers move a quest with [`post`](Quest::post),
@@ -188,15 +211,20 @@ impl std::fmt::Display for Stage {
 /// only ever have arrived where it is by a legal route.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Quest {
+    id: QuestId,
     state: State,
 }
 
 impl Quest {
     /// Writes up a new quest, not yet on the board.
     #[must_use]
-    pub fn new(client: Client) -> Self {
+    pub fn new(client: Client, hazard_tier: HazardTier) -> Self {
         Self {
-            state: State::Draft { client },
+            id: QuestId::new(),
+            state: State::Draft {
+                client,
+                hazard_tier,
+            },
         }
     }
 
@@ -243,8 +271,15 @@ impl Quest {
     /// Guild has promised to somebody else.
     pub fn post(&mut self, escrow: Escrow) -> Result<(), QuestError> {
         match self.state {
-            State::Draft { client } => {
-                self.state = State::Posted { escrow, client };
+            State::Draft {
+                client,
+                hazard_tier,
+            } => {
+                self.state = State::Posted {
+                    escrow,
+                    client,
+                    hazard_tier,
+                };
                 Ok(())
             }
             State::Posted { .. }
@@ -268,10 +303,15 @@ impl Quest {
     /// the party that got there first.
     pub fn accept(&mut self, party: Party) -> Result<(), QuestError> {
         match &self.state {
-            State::Posted { escrow, client } => {
+            State::Posted {
+                escrow,
+                client,
+                hazard_tier,
+            } => {
                 self.state = State::Accepted {
                     escrow: escrow.clone(),
                     client: *client,
+                    hazard_tier: *hazard_tier,
                     party,
                 };
                 Ok(())
@@ -412,7 +452,7 @@ mod tests {
     use crate::{party::Party, quest::Escrow};
 
     fn posted() -> Quest {
-        let mut quest = Quest::new(Client);
+        let mut quest = Quest::new(Client, HazardTier::Errand);
         quest
             .post(Escrow::unfunded())
             .expect("a draft can be posted");
@@ -459,14 +499,14 @@ mod tests {
 
     #[test]
     fn should_begin_life_as_a_draft() {
-        assert_eq!(Quest::new(Client).stage(), Stage::Draft);
+        assert_eq!(Quest::new(Client, HazardTier::Errand).stage(), Stage::Draft);
     }
 
     // Posting.
 
     #[test]
     fn should_post_a_draft() {
-        let mut quest = Quest::new(Client);
+        let mut quest = Quest::new(Client, HazardTier::Errand);
 
         let moved = quest.post(Escrow::unfunded());
 
@@ -510,7 +550,7 @@ mod tests {
 
     #[test]
     fn should_refuse_to_accept_a_draft_that_was_never_posted() {
-        let mut quest = Quest::new(Client);
+        let mut quest = Quest::new(Client, HazardTier::Errand);
 
         let moved = quest.accept(Party);
 
@@ -623,7 +663,7 @@ mod tests {
 
     #[test]
     fn should_refuse_to_abandon_a_draft_nobody_was_promised() {
-        let mut quest = Quest::new(Client);
+        let mut quest = Quest::new(Client, HazardTier::Errand);
 
         let moved = quest.abandon();
 
@@ -706,7 +746,7 @@ mod tests {
 
     #[test]
     fn should_walk_the_lifecycle_from_draft_to_settled() {
-        let mut quest = Quest::new(Client);
+        let mut quest = Quest::new(Client, HazardTier::Errand);
 
         quest
             .post(Escrow::unfunded())
@@ -739,10 +779,18 @@ mod tests {
     /// holding an escrow and a party — deliberate or not, this pins it.
     #[test]
     fn should_render_a_state_together_with_what_it_holds() {
-        assert_eq!(State::Draft { client: Client }.to_string(), "a draft");
+        assert_eq!(
+            State::Draft {
+                client: Client,
+                hazard_tier: HazardTier::Errand
+            }
+            .to_string(),
+            "a draft"
+        );
         assert_eq!(
             State::Posted {
                 escrow: Escrow::unfunded(),
+                hazard_tier: HazardTier::Errand,
                 client: Client
             }
             .to_string(),
@@ -751,6 +799,7 @@ mod tests {
         assert_eq!(
             State::Accepted {
                 escrow: Escrow::unfunded(),
+                hazard_tier: HazardTier::Errand,
                 party: Party,
                 client: Client,
             }
