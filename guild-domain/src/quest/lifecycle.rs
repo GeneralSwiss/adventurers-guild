@@ -67,7 +67,10 @@
 //! held to. A catch-all would compile instead, and silently refuse the new
 //! state everywhere.
 
-use crate::{party::Party, quest::Escrow};
+use crate::{
+    party::Party,
+    quest::{Escrow, client::Client},
+};
 use std::fmt::{self, Display, Formatter};
 
 /// Where a quest stands.
@@ -76,15 +79,24 @@ use std::fmt::{self, Display, Formatter};
 /// what is `Posted`, settlement looks for what is `Resolved` — unlike the
 /// escrow's states, which callers only ever need through
 /// [`balance`](super::escrow::Escrow::balance).
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum State {
     /// Written up, but not yet on the board.
-    #[default]
-    Draft,
+    Draft {
+        /// The client that owns the quest (?)
+        client: Client,
+    },
     /// On the board, waiting for a party to take it.
-    Posted(Escrow),
+    Posted {
+        /// The client that owns the quest.
+        client: Client,
+        /// The bounty held against the quest
+        escrow: Escrow,
+    },
     /// Taken by a party that has not set out yet.
     Accepted {
+        /// The client that owns the quest
+        client: Client,
         /// The bounty held against the quest.
         escrow: Escrow,
         /// The party that took it on.
@@ -103,8 +115,8 @@ enum State {
 impl State {
     fn stage(&self) -> Stage {
         match self {
-            State::Draft => Stage::Draft,
-            State::Posted(_) => Stage::Posted,
+            State::Draft { .. } => Stage::Draft,
+            State::Posted { .. } => Stage::Posted,
             State::Accepted { .. } => Stage::Accepted,
             State::InProgress => Stage::InProgress,
             State::Resolved => Stage::Resolved,
@@ -119,8 +131,10 @@ impl Display for State {
     /// reads `... quest that is in progress` rather than `... InProgress`.
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
-            State::Draft => write!(f, "a draft"),
-            State::Posted(escrow) => write!(f, "posted backed by {escrow}"),
+            State::Draft { client } => write!(f, "a draft of a quest commissioned by {client}"),
+            State::Posted { escrow, client } => {
+                write!(f, "posted backed by {escrow} and commissioned by {client}")
+            }
             State::Accepted { .. } => write!(f, "accepted"),
             State::InProgress => write!(f, "in progress"),
             State::Resolved => write!(f, "resolved"),
@@ -172,7 +186,7 @@ impl std::fmt::Display for Stage {
 /// [`stage`](Quest::stage), [`bounty`](Quest::bounty) and
 /// [`party`](Quest::party). There is no way to set it directly, so a quest can
 /// only ever have arrived where it is by a legal route.
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Quest {
     state: State,
 }
@@ -180,9 +194,9 @@ pub struct Quest {
 impl Quest {
     /// Writes up a new quest, not yet on the board.
     #[must_use]
-    pub fn new() -> Self {
+    pub fn new(client: Client) -> Self {
         Self {
-            state: State::Draft,
+            state: State::Draft { client },
         }
     }
 
@@ -197,8 +211,8 @@ impl Quest {
     #[must_use]
     pub fn bounty(&self) -> Option<&Escrow> {
         match self.state {
-            State::Posted(ref escrow) | State::Accepted { ref escrow, .. } => Some(escrow),
-            State::Draft
+            State::Posted { ref escrow, .. } | State::Accepted { ref escrow, .. } => Some(escrow),
+            State::Draft { .. }
             | State::InProgress
             | State::Resolved
             | State::Abandoned
@@ -211,8 +225,8 @@ impl Quest {
     pub fn party(&self) -> Option<&Party> {
         match self.state {
             State::Accepted { ref party, .. } => Some(party),
-            State::Draft
-            | State::Posted(_)
+            State::Draft { .. }
+            | State::Posted { .. }
             | State::InProgress
             | State::Resolved
             | State::Abandoned
@@ -229,11 +243,11 @@ impl Quest {
     /// Guild has promised to somebody else.
     pub fn post(&mut self, escrow: Escrow) -> Result<(), QuestError> {
         match self.state {
-            State::Draft => {
-                self.state = State::Posted(escrow);
+            State::Draft { client } => {
+                self.state = State::Posted { escrow, client };
                 Ok(())
             }
-            State::Posted(_)
+            State::Posted { .. }
             | State::Accepted { .. }
             | State::InProgress
             | State::Resolved
@@ -254,14 +268,15 @@ impl Quest {
     /// the party that got there first.
     pub fn accept(&mut self, party: Party) -> Result<(), QuestError> {
         match &self.state {
-            State::Posted(escrow) => {
+            State::Posted { escrow, client } => {
                 self.state = State::Accepted {
                     escrow: escrow.clone(),
+                    client: *client,
                     party,
                 };
                 Ok(())
             }
-            State::Draft
+            State::Draft { .. }
             | State::Accepted { .. }
             | State::InProgress
             | State::Resolved
@@ -285,8 +300,8 @@ impl Quest {
                 self.state = State::InProgress;
                 Ok(())
             }
-            State::Draft
-            | State::Posted(_)
+            State::Draft { .. }
+            | State::Posted { .. }
             | State::InProgress
             | State::Resolved
             | State::Abandoned
@@ -309,8 +324,8 @@ impl Quest {
                 self.state = State::Resolved;
                 Ok(())
             }
-            State::Draft
-            | State::Posted(_)
+            State::Draft { .. }
+            | State::Posted { .. }
             | State::Accepted { .. }
             | State::Resolved
             | State::Abandoned
@@ -334,8 +349,8 @@ impl Quest {
                 self.state = State::Settled;
                 Ok(())
             }
-            State::Draft
-            | State::Posted(_)
+            State::Draft { .. }
+            | State::Posted { .. }
             | State::Accepted { .. }
             | State::InProgress
             | State::Abandoned
@@ -361,8 +376,8 @@ impl Quest {
                 self.state = State::Abandoned;
                 Ok(())
             }
-            State::Posted(_)
-            | State::Draft
+            State::Posted { .. }
+            | State::Draft { .. }
             | State::Resolved
             | State::Abandoned
             | State::Settled => Err(QuestError::IllegalTransition {
@@ -397,7 +412,7 @@ mod tests {
     use crate::{party::Party, quest::Escrow};
 
     fn posted() -> Quest {
-        let mut quest = Quest::new();
+        let mut quest = Quest::new(Client);
         quest
             .post(Escrow::unfunded())
             .expect("a draft can be posted");
@@ -444,19 +459,14 @@ mod tests {
 
     #[test]
     fn should_begin_life_as_a_draft() {
-        assert_eq!(Quest::new().stage(), Stage::Draft);
-    }
-
-    #[test]
-    fn should_default_to_the_same_quest_new_builds() {
-        assert_eq!(Quest::default(), Quest::new());
+        assert_eq!(Quest::new(Client).stage(), Stage::Draft);
     }
 
     // Posting.
 
     #[test]
     fn should_post_a_draft() {
-        let mut quest = Quest::new();
+        let mut quest = Quest::new(Client);
 
         let moved = quest.post(Escrow::unfunded());
 
@@ -500,7 +510,7 @@ mod tests {
 
     #[test]
     fn should_refuse_to_accept_a_draft_that_was_never_posted() {
-        let mut quest = Quest::new();
+        let mut quest = Quest::new(Client);
 
         let moved = quest.accept(Party);
 
@@ -613,7 +623,7 @@ mod tests {
 
     #[test]
     fn should_refuse_to_abandon_a_draft_nobody_was_promised() {
-        let mut quest = Quest::new();
+        let mut quest = Quest::new(Client);
 
         let moved = quest.abandon();
 
@@ -696,7 +706,7 @@ mod tests {
 
     #[test]
     fn should_walk_the_lifecycle_from_draft_to_settled() {
-        let mut quest = Quest::new();
+        let mut quest = Quest::new(Client);
 
         quest
             .post(Escrow::unfunded())
@@ -729,15 +739,20 @@ mod tests {
     /// holding an escrow and a party — deliberate or not, this pins it.
     #[test]
     fn should_render_a_state_together_with_what_it_holds() {
-        assert_eq!(State::Draft.to_string(), "a draft");
+        assert_eq!(State::Draft { client: Client }.to_string(), "a draft");
         assert_eq!(
-            State::Posted(Escrow::unfunded()).to_string(),
+            State::Posted {
+                escrow: Escrow::unfunded(),
+                client: Client
+            }
+            .to_string(),
             "posted backed by unfunded escrow"
         );
         assert_eq!(
             State::Accepted {
                 escrow: Escrow::unfunded(),
                 party: Party,
+                client: Client,
             }
             .to_string(),
             "accepted"

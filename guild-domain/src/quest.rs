@@ -13,6 +13,7 @@
 //! different things cannot share a name at this level — so the quest's
 //! [`Stage`] is re-exported and the escrow's stays `escrow::Stage`.
 
+pub mod client;
 pub mod escrow;
 pub mod hazard_tier;
 pub mod lifecycle;
