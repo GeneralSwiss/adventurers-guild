@@ -7,16 +7,17 @@
 //! be abandoned to get the bounty back.
 //!
 //! ```
-//! use guild_domain::quest::Quest;
+//! use guild_domain::party::Party;
+//! use guild_domain::quest::{Escrow, Quest};
 //!
 //! let mut quest = Quest::new();
-//! quest.post()?;
-//! quest.accept()?;
+//! quest.post(Escrow::unfunded())?;
+//! quest.accept(Party::new())?;
 //! quest.begin()?;
 //! quest.resolve()?;
 //! quest.settle()?;
 //!
-//! assert_eq!(quest.state().to_string(), "settled");
+//! assert_eq!(quest.stage().to_string(), "settled");
 //! # Ok::<(), guild_domain::quest::QuestError>(())
 //! ```
 //!
@@ -66,18 +67,8 @@
 //! held to. A catch-all would compile instead, and silently refuse the new
 //! state everywhere.
 
+use crate::{party::Party, quest::Escrow};
 use std::fmt::{self, Display, Formatter};
-
-/// A quest the Guild is hired to do, tracked through its lifecycle.
-///
-/// The state is private: callers move a quest with [`post`](Quest::post),
-/// [`accept`](Quest::accept) and the rest, and read it with
-/// [`state`](Quest::state). There is no way to set it directly, so a quest can
-/// only ever have arrived where it is by a legal route.
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub struct Quest {
-    state: State,
-}
 
 /// Where a quest stands.
 ///
@@ -85,10 +76,64 @@ pub struct Quest {
 /// what is `Posted`, settlement looks for what is `Resolved` — unlike the
 /// escrow's states, which callers only ever need through
 /// [`balance`](super::escrow::Escrow::balance).
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub enum State {
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+enum State {
     /// Written up, but not yet on the board.
     #[default]
+    Draft,
+    /// On the board, waiting for a party to take it.
+    Posted(Escrow),
+    /// Taken by a party that has not set out yet.
+    Accepted {
+        /// The bounty held against the quest.
+        escrow: Escrow,
+        /// The party that took it on.
+        party: Party,
+    },
+    /// Being worked.
+    InProgress,
+    /// Come to an end in the world, for good or ill; the books do not know yet.
+    Resolved,
+    /// Given up before resolution.
+    Abandoned,
+    /// Resolved, and the bounty accounted for.
+    Settled,
+}
+
+impl State {
+    fn stage(&self) -> Stage {
+        match self {
+            State::Draft => Stage::Draft,
+            State::Posted(_) => Stage::Posted,
+            State::Accepted { .. } => Stage::Accepted,
+            State::InProgress => Stage::InProgress,
+            State::Resolved => Stage::Resolved,
+            State::Abandoned => Stage::Abandoned,
+            State::Settled => Stage::Settled,
+        }
+    }
+}
+
+impl Display for State {
+    /// Renders the state as a Guild clerk would say it, so an error message
+    /// reads `... quest that is in progress` rather than `... InProgress`.
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            State::Draft => write!(f, "a draft"),
+            State::Posted(escrow) => write!(f, "posted backed by {escrow}"),
+            State::Accepted { .. } => write!(f, "accepted"),
+            State::InProgress => write!(f, "in progress"),
+            State::Resolved => write!(f, "resolved"),
+            State::Abandoned => write!(f, "abandoned"),
+            State::Settled => write!(f, "settled"),
+        }
+    }
+}
+
+/// Which state a quest is in, without what that state holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Stage {
+    /// Written up, but not yet on the board.
     Draft,
     /// On the board, waiting for a party to take it.
     Posted,
@@ -104,20 +149,32 @@ pub enum State {
     Settled,
 }
 
-impl Display for State {
-    /// Renders the state as a Guild clerk would say it, so an error message
-    /// reads `... quest that is in progress` rather than `... InProgress`.
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            State::Draft => "a draft",
-            State::Posted => "posted",
-            State::Accepted => "accepted",
-            State::InProgress => "in progress",
-            State::Resolved => "resolved",
-            State::Abandoned => "abandoned",
-            State::Settled => "settled",
-        })
+impl std::fmt::Display for Stage {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        let variant = match self {
+            Stage::Draft => "draft",
+            Stage::Posted => "posted",
+            Stage::Accepted => "accepted",
+            Stage::InProgress => "in progress",
+            Stage::Resolved => "resolved",
+            Stage::Abandoned => "abandoned",
+            Stage::Settled => "settled",
+        };
+
+        f.write_str(variant)
     }
+}
+
+/// A quest the Guild is hired to do, tracked through its lifecycle.
+///
+/// The state is private: callers move a quest with [`post`](Quest::post),
+/// [`accept`](Quest::accept) and the rest, and read it with
+/// [`stage`](Quest::stage), [`bounty`](Quest::bounty) and
+/// [`party`](Quest::party). There is no way to set it directly, so a quest can
+/// only ever have arrived where it is by a legal route.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct Quest {
+    state: State,
 }
 
 impl Quest {
@@ -129,10 +186,38 @@ impl Quest {
         }
     }
 
-    /// Where the quest stands.
+    /// Where the quest stands, without what that state holds.
     #[must_use]
-    pub fn state(&self) -> State {
-        self.state
+    pub fn stage(&self) -> Stage {
+        self.state.stage()
+    }
+
+    /// The bounty held against the quest, or `None` before it is posted and
+    /// after it ends.
+    #[must_use]
+    pub fn bounty(&self) -> Option<&Escrow> {
+        match self.state {
+            State::Posted(ref escrow) | State::Accepted { ref escrow, .. } => Some(escrow),
+            State::Draft
+            | State::InProgress
+            | State::Resolved
+            | State::Abandoned
+            | State::Settled => None,
+        }
+    }
+
+    /// The party that took the quest on, or `None` while nobody has.
+    #[must_use]
+    pub fn party(&self) -> Option<&Party> {
+        match self.state {
+            State::Accepted { ref party, .. } => Some(party),
+            State::Draft
+            | State::Posted(_)
+            | State::InProgress
+            | State::Resolved
+            | State::Abandoned
+            | State::Settled => None,
+        }
     }
 
     /// Puts the quest on the board, where a party can take it.
@@ -142,20 +227,20 @@ impl Quest {
     /// [`QuestError::IllegalTransition`] from any state but `Draft` — a quest
     /// is posted once, and re-posting one already taken would offer work the
     /// Guild has promised to somebody else.
-    pub fn post(&mut self) -> Result<(), QuestError> {
+    pub fn post(&mut self, escrow: Escrow) -> Result<(), QuestError> {
         match self.state {
             State::Draft => {
-                self.state = State::Posted;
+                self.state = State::Posted(escrow);
                 Ok(())
             }
-            State::Posted
-            | State::Accepted
+            State::Posted(_)
+            | State::Accepted { .. }
             | State::InProgress
             | State::Resolved
             | State::Abandoned
             | State::Settled => Err(QuestError::IllegalTransition {
-                from: self.state,
-                to: State::Posted,
+                from: self.stage(),
+                to: Stage::Posted,
             }),
         }
     }
@@ -167,20 +252,23 @@ impl Quest {
     /// [`QuestError::IllegalTransition`] from any state but `Posted` — only
     /// a quest on the board is on offer, and one already accepted belongs to
     /// the party that got there first.
-    pub fn accept(&mut self) -> Result<(), QuestError> {
-        match self.state {
-            State::Posted => {
-                self.state = State::Accepted;
+    pub fn accept(&mut self, party: Party) -> Result<(), QuestError> {
+        match &self.state {
+            State::Posted(escrow) => {
+                self.state = State::Accepted {
+                    escrow: escrow.clone(),
+                    party,
+                };
                 Ok(())
             }
             State::Draft
-            | State::Accepted
+            | State::Accepted { .. }
             | State::InProgress
             | State::Resolved
             | State::Abandoned
             | State::Settled => Err(QuestError::IllegalTransition {
-                from: self.state,
-                to: State::Accepted,
+                from: self.stage(),
+                to: Stage::Accepted,
             }),
         }
     }
@@ -193,18 +281,18 @@ impl Quest {
     /// there is no party to set out until one has taken the quest.
     pub fn begin(&mut self) -> Result<(), QuestError> {
         match self.state {
-            State::Accepted => {
+            State::Accepted { .. } => {
                 self.state = State::InProgress;
                 Ok(())
             }
             State::Draft
-            | State::Posted
+            | State::Posted(_)
             | State::InProgress
             | State::Resolved
             | State::Abandoned
             | State::Settled => Err(QuestError::IllegalTransition {
-                from: self.state,
-                to: State::InProgress,
+                from: self.stage(),
+                to: Stage::InProgress,
             }),
         }
     }
@@ -222,13 +310,13 @@ impl Quest {
                 Ok(())
             }
             State::Draft
-            | State::Posted
-            | State::Accepted
+            | State::Posted(_)
+            | State::Accepted { .. }
             | State::Resolved
             | State::Abandoned
             | State::Settled => Err(QuestError::IllegalTransition {
-                from: self.state,
-                to: State::Resolved,
+                from: self.stage(),
+                to: Stage::Resolved,
             }),
         }
     }
@@ -247,13 +335,13 @@ impl Quest {
                 Ok(())
             }
             State::Draft
-            | State::Posted
-            | State::Accepted
+            | State::Posted(_)
+            | State::Accepted { .. }
             | State::InProgress
             | State::Abandoned
             | State::Settled => Err(QuestError::IllegalTransition {
-                from: self.state,
-                to: State::Settled,
+                from: self.stage(),
+                to: Stage::Settled,
             }),
         }
     }
@@ -269,16 +357,18 @@ impl Quest {
     /// `Accepted`.
     pub fn abandon(&mut self) -> Result<(), QuestError> {
         match self.state {
-            State::Accepted | State::InProgress => {
+            State::Accepted { .. } | State::InProgress => {
                 self.state = State::Abandoned;
                 Ok(())
             }
-            State::Posted | State::Draft | State::Resolved | State::Abandoned | State::Settled => {
-                Err(QuestError::IllegalTransition {
-                    from: self.state,
-                    to: State::Abandoned,
-                })
-            }
+            State::Posted(_)
+            | State::Draft
+            | State::Resolved
+            | State::Abandoned
+            | State::Settled => Err(QuestError::IllegalTransition {
+                from: self.stage(),
+                to: Stage::Abandoned,
+            }),
         }
     }
 }
@@ -294,25 +384,29 @@ pub enum QuestError {
     #[error("a quest that is {from} cannot become {to}")]
     IllegalTransition {
         /// Where the quest stood.
-        from: State,
+        from: Stage,
         /// What it was asked to become.
-        to: State,
+        to: Stage,
     },
 }
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
+    use crate::{party::Party, quest::Escrow};
 
     fn posted() -> Quest {
         let mut quest = Quest::new();
-        quest.post().expect("a draft can be posted");
+        quest
+            .post(Escrow::unfunded())
+            .expect("a draft can be posted");
         quest
     }
 
     fn accepted() -> Quest {
         let mut quest = posted();
-        quest.accept().expect("a posted quest can be accepted");
+        quest.accept(Party).expect("a posted quest can be accepted");
         quest
     }
 
@@ -342,7 +436,7 @@ mod tests {
         quest
     }
 
-    fn refused(from: State, to: State) -> Result<(), QuestError> {
+    fn refused(from: Stage, to: Stage) -> Result<(), QuestError> {
         Err(QuestError::IllegalTransition { from, to })
     }
 
@@ -350,7 +444,7 @@ mod tests {
 
     #[test]
     fn should_begin_life_as_a_draft() {
-        assert_eq!(Quest::new().state(), State::Draft);
+        assert_eq!(Quest::new().stage(), Stage::Draft);
     }
 
     #[test]
@@ -364,28 +458,30 @@ mod tests {
     fn should_post_a_draft() {
         let mut quest = Quest::new();
 
-        let moved = quest.post();
+        let moved = quest.post(Escrow::unfunded());
 
         assert_eq!(moved, Ok(()));
-        assert_eq!(quest.state(), State::Posted);
+        assert_eq!(quest.stage(), Stage::Posted);
+        assert_eq!(quest.bounty(), Some(&Escrow::unfunded()));
     }
 
     #[test]
     fn should_refuse_to_post_a_quest_that_is_already_posted() {
         let mut quest = posted();
+        let escrow = Escrow::unfunded();
+        let moved = quest.post(escrow);
 
-        let moved = quest.post();
-
-        assert_eq!(moved, refused(State::Posted, State::Posted));
+        assert_eq!(moved, refused(Stage::Posted, Stage::Posted));
     }
 
     #[test]
     fn should_refuse_to_post_a_settled_quest() {
         let mut quest = settled();
 
-        let moved = quest.post();
+        let escrow = Escrow::unfunded();
+        let moved = quest.post(escrow.clone());
 
-        assert_eq!(moved, refused(State::Settled, State::Posted));
+        assert_eq!(moved, refused(Stage::Settled, Stage::Posted));
     }
 
     // Accepting.
@@ -394,28 +490,30 @@ mod tests {
     fn should_accept_a_posted_quest() {
         let mut quest = posted();
 
-        let moved = quest.accept();
+        let moved = quest.accept(Party);
 
         assert_eq!(moved, Ok(()));
-        assert_eq!(quest.state(), State::Accepted);
+        assert_eq!(quest.stage(), Stage::Accepted);
+        assert_eq!(quest.bounty(), Some(&Escrow::unfunded()));
+        assert_eq!(quest.party(), Some(&Party));
     }
 
     #[test]
     fn should_refuse_to_accept_a_draft_that_was_never_posted() {
         let mut quest = Quest::new();
 
-        let moved = quest.accept();
+        let moved = quest.accept(Party);
 
-        assert_eq!(moved, refused(State::Draft, State::Accepted));
+        assert_eq!(moved, refused(Stage::Draft, Stage::Accepted));
     }
 
     #[test]
     fn should_refuse_to_accept_a_quest_a_party_already_took() {
         let mut quest = accepted();
 
-        let moved = quest.accept();
+        let moved = quest.accept(Party);
 
-        assert_eq!(moved, refused(State::Accepted, State::Accepted));
+        assert_eq!(moved, refused(Stage::Accepted, Stage::Accepted));
     }
 
     // Setting out.
@@ -427,7 +525,7 @@ mod tests {
         let moved = quest.begin();
 
         assert_eq!(moved, Ok(()));
-        assert_eq!(quest.state(), State::InProgress);
+        assert_eq!(quest.stage(), Stage::InProgress);
     }
 
     #[test]
@@ -436,7 +534,7 @@ mod tests {
 
         let moved = quest.begin();
 
-        assert_eq!(moved, refused(State::Posted, State::InProgress));
+        assert_eq!(moved, refused(Stage::Posted, Stage::InProgress));
     }
 
     // Resolving.
@@ -448,7 +546,7 @@ mod tests {
         let moved = quest.resolve();
 
         assert_eq!(moved, Ok(()));
-        assert_eq!(quest.state(), State::Resolved);
+        assert_eq!(quest.stage(), Stage::Resolved);
     }
 
     #[test]
@@ -457,7 +555,7 @@ mod tests {
 
         let moved = quest.resolve();
 
-        assert_eq!(moved, refused(State::Accepted, State::Resolved));
+        assert_eq!(moved, refused(Stage::Accepted, Stage::Resolved));
     }
 
     // Settling.
@@ -469,7 +567,7 @@ mod tests {
         let moved = quest.settle();
 
         assert_eq!(moved, Ok(()));
-        assert_eq!(quest.state(), State::Settled);
+        assert_eq!(quest.stage(), Stage::Settled);
     }
 
     #[test]
@@ -478,7 +576,7 @@ mod tests {
 
         let moved = quest.settle();
 
-        assert_eq!(moved, refused(State::InProgress, State::Settled));
+        assert_eq!(moved, refused(Stage::InProgress, Stage::Settled));
     }
 
     /// The one that stops the bounty being paid twice.
@@ -488,7 +586,7 @@ mod tests {
 
         let moved = quest.settle();
 
-        assert_eq!(moved, refused(State::Settled, State::Settled));
+        assert_eq!(moved, refused(Stage::Settled, Stage::Settled));
     }
 
     // Abandonment.
@@ -500,7 +598,7 @@ mod tests {
         let moved = quest.abandon();
 
         assert_eq!(moved, Ok(()));
-        assert_eq!(quest.state(), State::Abandoned);
+        assert_eq!(quest.stage(), Stage::Abandoned);
     }
 
     #[test]
@@ -510,7 +608,7 @@ mod tests {
         let moved = quest.abandon();
 
         assert_eq!(moved, Ok(()));
-        assert_eq!(quest.state(), State::Abandoned);
+        assert_eq!(quest.stage(), Stage::Abandoned);
     }
 
     #[test]
@@ -519,7 +617,7 @@ mod tests {
 
         let moved = quest.abandon();
 
-        assert_eq!(moved, refused(State::Draft, State::Abandoned));
+        assert_eq!(moved, refused(Stage::Draft, Stage::Abandoned));
     }
 
     /// Nobody has taken a posted quest on, so nobody can walk away from it.
@@ -530,7 +628,7 @@ mod tests {
 
         let moved = quest.abandon();
 
-        assert_eq!(moved, refused(State::Posted, State::Abandoned));
+        assert_eq!(moved, refused(Stage::Posted, Stage::Abandoned));
     }
 
     #[test]
@@ -539,7 +637,7 @@ mod tests {
 
         let moved = quest.abandon();
 
-        assert_eq!(moved, refused(State::Resolved, State::Abandoned));
+        assert_eq!(moved, refused(Stage::Resolved, Stage::Abandoned));
     }
 
     #[test]
@@ -548,7 +646,7 @@ mod tests {
 
         let moved = quest.abandon();
 
-        assert_eq!(moved, refused(State::Abandoned, State::Abandoned));
+        assert_eq!(moved, refused(Stage::Abandoned, Stage::Abandoned));
     }
 
     // A refused move must leave the quest exactly as it found it.
@@ -557,11 +655,13 @@ mod tests {
     fn should_leave_the_state_untouched_when_a_move_is_refused() {
         let mut quest = accepted();
 
-        let _ = quest.post();
+        let _ = quest.post(Escrow::unfunded());
         let _ = quest.resolve();
         let _ = quest.settle();
 
-        assert_eq!(quest.state(), State::Accepted);
+        assert_eq!(quest.stage(), Stage::Accepted);
+        assert_eq!(quest.bounty(), Some(&Escrow::unfunded()));
+        assert_eq!(quest.party(), Some(&Party));
     }
 
     // Terminal states let nothing out.
@@ -570,26 +670,26 @@ mod tests {
     fn should_refuse_every_move_out_of_a_settled_quest() {
         let mut quest = settled();
 
-        assert!(quest.post().is_err());
-        assert!(quest.accept().is_err());
+        assert!(quest.post(Escrow::unfunded()).is_err());
+        assert!(quest.accept(Party).is_err());
         assert!(quest.begin().is_err());
         assert!(quest.resolve().is_err());
         assert!(quest.settle().is_err());
         assert!(quest.abandon().is_err());
-        assert_eq!(quest.state(), State::Settled);
+        assert_eq!(quest.stage(), Stage::Settled);
     }
 
     #[test]
     fn should_refuse_every_move_out_of_an_abandoned_quest() {
         let mut quest = abandoned();
 
-        assert!(quest.post().is_err());
-        assert!(quest.accept().is_err());
+        assert!(quest.post(Escrow::unfunded()).is_err());
+        assert!(quest.accept(Party).is_err());
         assert!(quest.begin().is_err());
         assert!(quest.resolve().is_err());
         assert!(quest.settle().is_err());
         assert!(quest.abandon().is_err());
-        assert_eq!(quest.state(), State::Abandoned);
+        assert_eq!(quest.stage(), Stage::Abandoned);
     }
 
     // The whole road.
@@ -598,35 +698,58 @@ mod tests {
     fn should_walk_the_lifecycle_from_draft_to_settled() {
         let mut quest = Quest::new();
 
-        quest.post().expect("a draft can be posted");
-        quest.accept().expect("a posted quest can be accepted");
+        quest
+            .post(Escrow::unfunded())
+            .expect("a draft can be posted");
+        quest.accept(Party).expect("a posted quest can be accepted");
         quest.begin().expect("an accepted quest can begin");
         quest
             .resolve()
             .expect("a quest in progress can be resolved");
         quest.settle().expect("a resolved quest can be settled");
 
-        assert_eq!(quest.state(), State::Settled);
+        assert_eq!(quest.stage(), Stage::Settled);
     }
 
     // How they read.
 
     #[test]
-    fn should_render_each_state_in_the_words_a_clerk_would_use() {
+    fn should_render_each_stage_in_the_words_a_clerk_would_use() {
+        assert_eq!(Stage::Draft.to_string(), "draft");
+        assert_eq!(Stage::Posted.to_string(), "posted");
+        assert_eq!(Stage::Accepted.to_string(), "accepted");
+        assert_eq!(Stage::InProgress.to_string(), "in progress");
+        assert_eq!(Stage::Resolved.to_string(), "resolved");
+        assert_eq!(Stage::Abandoned.to_string(), "abandoned");
+        assert_eq!(Stage::Settled.to_string(), "settled");
+    }
+
+    /// A `State` renders what it holds as well as where it is, which is what
+    /// separates it from a [`Stage`]. Note `Accepted` renders bare despite
+    /// holding an escrow and a party — deliberate or not, this pins it.
+    #[test]
+    fn should_render_a_state_together_with_what_it_holds() {
         assert_eq!(State::Draft.to_string(), "a draft");
-        assert_eq!(State::Posted.to_string(), "posted");
-        assert_eq!(State::Accepted.to_string(), "accepted");
-        assert_eq!(State::InProgress.to_string(), "in progress");
-        assert_eq!(State::Resolved.to_string(), "resolved");
-        assert_eq!(State::Abandoned.to_string(), "abandoned");
+        assert_eq!(
+            State::Posted(Escrow::unfunded()).to_string(),
+            "posted backed by unfunded escrow"
+        );
+        assert_eq!(
+            State::Accepted {
+                escrow: Escrow::unfunded(),
+                party: Party,
+            }
+            .to_string(),
+            "accepted"
+        );
         assert_eq!(State::Settled.to_string(), "settled");
     }
 
     #[test]
     fn should_name_both_ends_of_the_move_it_refused() {
         let refused = QuestError::IllegalTransition {
-            from: State::InProgress,
-            to: State::Settled,
+            from: Stage::InProgress,
+            to: Stage::Settled,
         };
 
         assert_eq!(

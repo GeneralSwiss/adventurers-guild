@@ -77,22 +77,65 @@
 //! is the invariant.
 
 use core::fmt::Formatter;
+use std::fmt::Display;
 
 use crate::money::{Coin, MoneyError};
 
 /// Funds the Guild holds against a quest, from the patron's payment to the party's payout.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Escrow {
     state: State,
 }
 
 /// The escrow's whole lifecycle, private so no caller can name or match a state.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum State {
     Unfunded,
     Funded(Coin),
     Closed(Settlement),
 }
 
+/// Which state an escrow is in, without what that state holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Stage {
+    /// Holding no purse yet.
+    Unfunded,
+    /// Holding a bounty.
+    Funded,
+    /// Has let its bounty go.
+    Closed,
+}
+
+impl std::fmt::Display for Stage {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        let variant = match self {
+            Stage::Unfunded => "unfunded",
+            Stage::Funded => "funded",
+            Stage::Closed => "closed",
+        };
+
+        f.write_str(variant)
+    }
+}
+
+impl State {
+    /// Which stage this state belongs to.
+    fn stage(&self) -> Stage {
+        match self {
+            State::Unfunded => Stage::Unfunded,
+            State::Funded(_) => Stage::Funded,
+            State::Closed(_) => Stage::Closed,
+        }
+    }
+}
+
 impl Escrow {
+    /// Which stage the escrow is in.
+    #[must_use]
+    pub fn stage(&self) -> Stage {
+        self.state.stage()
+    }
+
     /// Opens an escrow that holds nothing yet.
     #[must_use]
     pub fn unfunded() -> Self {
@@ -198,7 +241,17 @@ impl Escrow {
     }
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+impl Display for Escrow {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self.state {
+            State::Unfunded => write!(f, "unfunded escrow"),
+            State::Funded(coin) => write!(f, "funded escrow with balance {coin}"),
+            State::Closed(settlement) => write!(f, "{settlement} escrow"),
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 /// How an escrow was closed, which is the one thing a closed escrow still knows.
 pub enum Settlement {
     /// The bounty went out to the party.
@@ -207,7 +260,7 @@ pub enum Settlement {
     Refunded,
 }
 
-impl std::fmt::Display for Settlement {
+impl Display for Settlement {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             Settlement::Dispersed => write!(f, "Dispersed"),
