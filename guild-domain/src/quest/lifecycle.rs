@@ -96,13 +96,32 @@ enum State {
         party: Party,
     },
     /// Being worked.
-    InProgress,
+    InProgress {
+        /// The bounty held against the quest.
+        escrow: Escrow,
+        /// The party that took it on.
+        party: Party,
+    },
     /// Come to an end in the world, for good or ill; the books do not know yet.
-    Resolved(Outcome),
+    Resolved {
+        /// The bounty held against the quest.
+        escrow: Escrow,
+        /// The party that took it on.
+        party: Party,
+        /// The outcome of the quest
+        outcome: Outcome,
+    },
     /// Given up before resolution.
     Abandoned,
     /// Resolved, and the bounty accounted for.
-    Settled(Outcome),
+    Settled {
+        /// The bounty held against the quest.
+        escrow: Escrow,
+        /// The party that took it on.
+        party: Party,
+        /// The outcome of the quest
+        outcome: Outcome,
+    },
 }
 
 impl State {
@@ -111,10 +130,10 @@ impl State {
             State::Draft => Stage::Draft,
             State::Posted { .. } => Stage::Posted,
             State::Accepted { .. } => Stage::Accepted,
-            State::InProgress => Stage::InProgress,
-            State::Resolved(_) => Stage::Resolved,
+            State::InProgress { .. } => Stage::InProgress,
+            State::Resolved { .. } => Stage::Resolved,
             State::Abandoned => Stage::Abandoned,
-            State::Settled(_) => Stage::Settled,
+            State::Settled { .. } => Stage::Settled,
         }
     }
 }
@@ -127,10 +146,10 @@ impl Display for State {
             State::Draft => write!(f, "a draft"),
             State::Posted { escrow } => write!(f, "posted backed by {escrow}"),
             State::Accepted { .. } => write!(f, "accepted"),
-            State::InProgress => write!(f, "in progress"),
-            State::Resolved(_) => write!(f, "resolved"),
+            State::InProgress { .. } => write!(f, "in progress"),
+            State::Resolved { .. } => write!(f, "resolved"),
             State::Abandoned => write!(f, "abandoned"),
-            State::Settled(_) => write!(f, "settled"),
+            State::Settled { .. } => write!(f, "settled"),
         }
     }
 }
@@ -228,10 +247,10 @@ impl Quest {
         match self.state {
             State::Posted { ref escrow, .. } | State::Accepted { ref escrow, .. } => Some(escrow),
             State::Draft
-            | State::InProgress
-            | State::Resolved(_)
+            | State::InProgress { .. }
+            | State::Resolved { .. }
             | State::Abandoned
-            | State::Settled(_) => None,
+            | State::Settled { .. } => None,
         }
     }
 
@@ -242,10 +261,10 @@ impl Quest {
             State::Accepted { ref party, .. } => Some(party),
             State::Draft
             | State::Posted { .. }
-            | State::InProgress
-            | State::Resolved(_)
+            | State::InProgress { .. }
+            | State::Resolved { .. }
             | State::Abandoned
-            | State::Settled(_) => None,
+            | State::Settled { .. } => None,
         }
     }
 
@@ -264,10 +283,10 @@ impl Quest {
             }
             State::Posted { .. }
             | State::Accepted { .. }
-            | State::InProgress
-            | State::Resolved(_)
+            | State::InProgress { .. }
+            | State::Resolved { .. }
             | State::Abandoned
-            | State::Settled(_) => Err(QuestError::IllegalTransition {
+            | State::Settled { .. } => Err(QuestError::IllegalTransition {
                 from: self.stage(),
                 to: Stage::Posted,
             }),
@@ -294,10 +313,10 @@ impl Quest {
             }
             State::Draft
             | State::Accepted { .. }
-            | State::InProgress
-            | State::Resolved(_)
+            | State::InProgress { .. }
+            | State::Resolved { .. }
             | State::Abandoned
-            | State::Settled(_) => {
+            | State::Settled { .. } => {
                 let from = original.stage();
                 self.state = original;
                 Err(QuestError::IllegalTransition {
@@ -315,20 +334,25 @@ impl Quest {
     /// [`QuestError::IllegalTransition`] from any state but `Accepted` —
     /// there is no party to set out until one has taken the quest.
     pub fn begin(&mut self) -> Result<(), QuestError> {
-        match self.state {
-            State::Accepted { .. } => {
-                self.state = State::InProgress;
+        let original = core::mem::replace(&mut self.state, State::Draft);
+        match original {
+            State::Accepted { escrow, party } => {
+                self.state = State::InProgress { escrow, party };
                 Ok(())
             }
             State::Draft
             | State::Posted { .. }
-            | State::InProgress
-            | State::Resolved(_)
+            | State::InProgress { .. }
+            | State::Resolved { .. }
             | State::Abandoned
-            | State::Settled(_) => Err(QuestError::IllegalTransition {
-                from: self.stage(),
-                to: Stage::InProgress,
-            }),
+            | State::Settled { .. } => {
+                let from = original.stage();
+                self.state = original;
+                Err(QuestError::IllegalTransition {
+                    from,
+                    to: Stage::InProgress,
+                })
+            }
         }
     }
 
@@ -339,20 +363,29 @@ impl Quest {
     /// [`QuestError::IllegalTransition`] from any state but `InProgress` —
     /// work that never started cannot have finished.
     pub fn resolve(&mut self, outcome: Outcome) -> Result<(), QuestError> {
-        match self.state {
-            State::InProgress => {
-                self.state = State::Resolved(outcome);
+        let original = core::mem::replace(&mut self.state, State::Draft);
+        match original {
+            State::InProgress { escrow, party } => {
+                self.state = State::Resolved {
+                    escrow,
+                    party,
+                    outcome,
+                };
                 Ok(())
             }
             State::Draft
             | State::Posted { .. }
             | State::Accepted { .. }
-            | State::Resolved(_)
+            | State::Resolved { .. }
             | State::Abandoned
-            | State::Settled(_) => Err(QuestError::IllegalTransition {
-                from: self.stage(),
-                to: Stage::Resolved,
-            }),
+            | State::Settled { .. } => {
+                let from = original.stage();
+                self.state = original;
+                Err(QuestError::IllegalTransition {
+                    from,
+                    to: Stage::Resolved,
+                })
+            }
         }
     }
 
@@ -364,20 +397,33 @@ impl Quest {
     /// settling twice would pay the bounty twice, and settling early would pay
     /// for work that has not ended.
     pub fn settle(&mut self) -> Result<(), QuestError> {
-        match &self.state {
-            State::Resolved(outcome) => {
-                self.state = State::Settled(outcome.clone());
+        let original = core::mem::replace(&mut self.state, State::Draft);
+        match original {
+            State::Resolved {
+                escrow,
+                party,
+                outcome,
+            } => {
+                self.state = State::Settled {
+                    escrow,
+                    party,
+                    outcome,
+                };
                 Ok(())
             }
             State::Draft
             | State::Posted { .. }
             | State::Accepted { .. }
-            | State::InProgress
+            | State::InProgress { .. }
             | State::Abandoned
-            | State::Settled(_) => Err(QuestError::IllegalTransition {
-                from: self.stage(),
-                to: Stage::Settled,
-            }),
+            | State::Settled { .. } => {
+                let from = original.stage();
+                self.state = original;
+                Err(QuestError::IllegalTransition {
+                    from,
+                    to: Stage::Settled,
+                })
+            }
         }
     }
 
@@ -392,15 +438,15 @@ impl Quest {
     /// `Accepted`.
     pub fn abandon(&mut self) -> Result<(), QuestError> {
         match self.state {
-            State::Accepted { .. } | State::InProgress => {
+            State::Accepted { .. } | State::InProgress { .. } => {
                 self.state = State::Abandoned;
                 Ok(())
             }
             State::Posted { .. }
             | State::Draft
-            | State::Resolved(_)
+            | State::Resolved { .. }
             | State::Abandoned
-            | State::Settled(_) => Err(QuestError::IllegalTransition {
+            | State::Settled { .. } => Err(QuestError::IllegalTransition {
                 from: self.stage(),
                 to: Stage::Abandoned,
             }),
@@ -797,10 +843,33 @@ mod tests {
             .to_string(),
             "accepted"
         );
-        assert_eq!(State::InProgress.to_string(), "in progress");
-        assert_eq!(State::Resolved(Outcome::Successful).to_string(), "resolved");
+        assert_eq!(
+            State::InProgress {
+                escrow: Escrow::unfunded(),
+                party: Party
+            }
+            .to_string(),
+            "in progress"
+        );
+        assert_eq!(
+            State::Resolved {
+                escrow: Escrow::unfunded(),
+                party: Party,
+                outcome: Outcome::Successful
+            }
+            .to_string(),
+            "resolved"
+        );
         assert_eq!(State::Abandoned.to_string(), "abandoned");
-        assert_eq!(State::Settled(Outcome::Successful).to_string(), "settled");
+        assert_eq!(
+            State::Settled {
+                escrow: Escrow::unfunded(),
+                party: Party,
+                outcome: Outcome::Successful
+            }
+            .to_string(),
+            "settled"
+        );
     }
 
     #[test]
