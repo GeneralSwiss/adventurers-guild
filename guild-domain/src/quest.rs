@@ -5,6 +5,7 @@
 //! | [`hazard_tier`] | [`HazardTier`], how dangerous a quest is               |
 //! | [`escrow`]      | [`Escrow`], the bounty from payment to payout          |
 //! | [`lifecycle`]   | [`Quest`], where it stands and what it may do next     |
+//! | [`outcome`]     | [`Outcome`], how a quest ended                         |
 //!
 //! Types are re-exported here, so `quest::HazardTier` is the path to prefer
 //! over `quest::hazard_tier::HazardTier`.
@@ -17,7 +18,9 @@ pub mod client;
 pub mod escrow;
 pub mod hazard_tier;
 pub mod lifecycle;
+pub mod outcome;
 
 pub use escrow::{Escrow, EscrowError, Settlement};
 pub use hazard_tier::HazardTier;
 pub use lifecycle::{Quest, QuestError, Stage};
+pub use outcome::Outcome;
