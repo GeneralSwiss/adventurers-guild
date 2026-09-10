@@ -8,13 +8,13 @@
 //!
 //! ```
 //! use guild_domain::party::Party;
-//! use guild_domain::quest::{Escrow, Quest, client::Client, HazardTier};
+//! use guild_domain::quest::{Escrow, HazardTier, Outcome, Quest, client::Client};
 //!
 //! let mut quest = Quest::new(Client, HazardTier::Errand);
 //! quest.post(Escrow::unfunded())?;
 //! quest.accept(Party::new())?;
 //! quest.begin()?;
-//! quest.resolve()?;
+//! quest.resolve(Outcome::Successful)?;
 //! quest.settle()?;
 //!
 //! assert_eq!(quest.stage().to_string(), "settled");
@@ -30,7 +30,8 @@
 //! | `Accepted`    | [`begin`]   | `InProgress`  |
 //! | `InProgress`  | [`resolve`] | `Resolved`    |
 //! | `Resolved`    | [`settle`]  | `Settled`     |
-//! | `Accepted`, `InProgress` | [`abandon`] | `Abandoned` |
+//! | `Accepted`, `InProgress` | [`abandon`] | `Posted` |
+//! | `Posted`      | [`rescind`] | `Rescinded`   |
 //!
 //! [`post`]: Quest::post
 //! [`accept`]: Quest::accept
@@ -38,21 +39,28 @@
 //! [`resolve`]: Quest::resolve
 //! [`settle`]: Quest::settle
 //! [`abandon`]: Quest::abandon
+//! [`rescind`]: Quest::rescind
 //!
-//! `Settled` and `Abandoned` are terminal — every move out of them is refused.
+//! `Settled` and `Rescinded` are terminal — every move out of them is refused.
 //! Anything not in that table is refused too, and the error names both the
 //! state the quest was in and the one it was asked to become.
 //!
-//! # Three judgement calls
+//! # Four judgement calls
 //!
-//! **Abandonment starts at `Accepted`.** There is something to give up only
-//! once a party has taken the quest on. A `Draft` has nobody waiting on it, and
-//! a `Posted` quest has no party to walk away — pulling that one off the board
-//! is a different act, and it is not modelled here yet.
+//! **Abandoning is not the same as rescinding.** A party that walks away ends
+//! its own engagement, not the quest: the escrow stays put and the quest goes
+//! back on the board for somebody else to try. Only the client can end the
+//! quest, by [`rescind`](Quest::rescind)ing it, and only while nobody has taken
+//! it on. Conflating the two is what made abandonment destroy a funded escrow.
 //!
-//! **A posting cannot be withdrawn.** There is no `Posted -> Draft`. Once the
-//! board says a quest is available, retracting it is abandonment — visible,
-//! recorded, and paired with a refund — not an edit that leaves no trace.
+//! **The lifecycle is therefore not one-way.** `Posted -> Accepted ->
+//! InProgress -> Posted` is a legal circuit, and a quest may be attempted any
+//! number of times. A later [`Stage`] does not mean further along.
+//!
+//! **Only the party that finishes is paid.** A quest carries the party
+//! currently working it and no history of the ones before, because settlement
+//! owes nothing to a party that walked away. If that rule ever softens, the
+//! engagements become a list and this is the decision to revisit.
 //!
 //! **`Resolved` is not `Settled`.** Resolution is a fact about the world (the
 //! party came back, alive or otherwise); settlement is a fact about the books
@@ -69,7 +77,7 @@
 
 use crate::{
     party::Party,
-    quest::{Escrow, HazardTier, client::Client},
+    quest::{Escrow, HazardTier, client::Client, outcome::Outcome},
 };
 use std::fmt::{self, Display, Formatter};
 
@@ -79,55 +87,65 @@ use std::fmt::{self, Display, Formatter};
 /// what is `Posted`, settlement looks for what is `Resolved` — unlike the
 /// escrow's states, which callers only ever need through
 /// [`balance`](super::escrow::Escrow::balance).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 enum State {
     /// Written up, but not yet on the board.
-    Draft {
-        /// The client that owns the quest (?)
-        client: Client,
-        /// The hazard Tier of the quest
-        hazard_tier: HazardTier,
-    },
+    Draft,
     /// On the board, waiting for a party to take it.
     Posted {
-        /// The client that owns the quest.
-        client: Client,
-        /// The hazard Tier of the quest
-        hazard_tier: HazardTier,
-        /// The bounty held against the quest
+        /// The bounty held against the quest.
         escrow: Escrow,
     },
     /// Taken by a party that has not set out yet.
     Accepted {
-        /// The client that owns the quest
-        client: Client,
-        /// The hazard Tier of the quest
-        hazard_tier: HazardTier,
         /// The bounty held against the quest.
         escrow: Escrow,
         /// The party that took it on.
         party: Party,
     },
     /// Being worked.
-    InProgress,
+    InProgress {
+        /// The bounty held against the quest.
+        escrow: Escrow,
+        /// The party that took it on.
+        party: Party,
+    },
     /// Come to an end in the world, for good or ill; the books do not know yet.
-    Resolved,
-    /// Given up before resolution.
-    Abandoned,
+    Resolved {
+        /// The bounty held against the quest.
+        escrow: Escrow,
+        /// The party that took it on.
+        party: Party,
+        /// The outcome of the quest
+        outcome: Outcome,
+    },
+    /// Withdrawn by the client before anyone took it on; the bounty is owed
+    /// back to them.
+    Rescinded {
+        /// The bounty still held against the quest, awaiting refund.
+        escrow: Escrow,
+    },
     /// Resolved, and the bounty accounted for.
-    Settled,
+    Settled {
+        /// The bounty held against the quest.
+        escrow: Escrow,
+        /// The party that took it on.
+        party: Party,
+        /// The outcome of the quest
+        outcome: Outcome,
+    },
 }
 
 impl State {
     fn stage(&self) -> Stage {
         match self {
-            State::Draft { .. } => Stage::Draft,
+            State::Draft => Stage::Draft,
             State::Posted { .. } => Stage::Posted,
             State::Accepted { .. } => Stage::Accepted,
-            State::InProgress => Stage::InProgress,
-            State::Resolved => Stage::Resolved,
-            State::Abandoned => Stage::Abandoned,
-            State::Settled => Stage::Settled,
+            State::InProgress { .. } => Stage::InProgress,
+            State::Resolved { .. } => Stage::Resolved,
+            State::Rescinded { .. } => Stage::Rescinded,
+            State::Settled { .. } => Stage::Settled,
         }
     }
 }
@@ -137,15 +155,13 @@ impl Display for State {
     /// reads `... quest that is in progress` rather than `... InProgress`.
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
-            State::Draft { client, .. } => write!(f, "a draft of a quest commissioned by {client}"),
-            State::Posted { escrow, client, .. } => {
-                write!(f, "posted backed by {escrow} and commissioned by {client}")
-            }
+            State::Draft => write!(f, "a draft"),
+            State::Posted { escrow } => write!(f, "posted backed by {escrow}"),
             State::Accepted { .. } => write!(f, "accepted"),
-            State::InProgress => write!(f, "in progress"),
-            State::Resolved => write!(f, "resolved"),
-            State::Abandoned => write!(f, "abandoned"),
-            State::Settled => write!(f, "settled"),
+            State::InProgress { .. } => write!(f, "in progress"),
+            State::Resolved { .. } => write!(f, "resolved"),
+            State::Rescinded { escrow } => write!(f, "rescinded, still holding {escrow}"),
+            State::Settled { .. } => write!(f, "settled"),
         }
     }
 }
@@ -163,8 +179,8 @@ pub enum Stage {
     InProgress,
     /// Come to an end in the world, for good or ill; the books do not know yet.
     Resolved,
-    /// Given up before resolution.
-    Abandoned,
+    /// Withdrawn by the client before anyone took it on.
+    Rescinded,
     /// Resolved, and the bounty accounted for.
     Settled,
 }
@@ -177,7 +193,7 @@ impl std::fmt::Display for Stage {
             Stage::Accepted => "accepted",
             Stage::InProgress => "in progress",
             Stage::Resolved => "resolved",
-            Stage::Abandoned => "abandoned",
+            Stage::Rescinded => "rescinded",
             Stage::Settled => "settled",
         };
 
@@ -210,9 +226,11 @@ impl Default for QuestId {
 /// [`stage`](Quest::stage), [`bounty`](Quest::bounty) and
 /// [`party`](Quest::party). There is no way to set it directly, so a quest can
 /// only ever have arrived where it is by a legal route.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct Quest {
     id: QuestId,
+    client: Client,
+    hazard_tier: HazardTier,
     state: State,
 }
 
@@ -222,10 +240,9 @@ impl Quest {
     pub fn new(client: Client, hazard_tier: HazardTier) -> Self {
         Self {
             id: QuestId::new(),
-            state: State::Draft {
-                client,
-                hazard_tier,
-            },
+            client,
+            hazard_tier,
+            state: State::Draft,
         }
     }
 
@@ -235,31 +252,30 @@ impl Quest {
         self.state.stage()
     }
 
-    /// The bounty held against the quest, or `None` before it is posted and
-    /// after it ends.
+    /// The escrow held against the quest, or `None` in `Draft`, before one has
+    /// been placed.
     #[must_use]
     pub fn bounty(&self) -> Option<&Escrow> {
         match self.state {
-            State::Posted { ref escrow, .. } | State::Accepted { ref escrow, .. } => Some(escrow),
-            State::Draft { .. }
-            | State::InProgress
-            | State::Resolved
-            | State::Abandoned
-            | State::Settled => None,
+            State::Posted { ref escrow, .. }
+            | State::Accepted { ref escrow, .. }
+            | State::InProgress { ref escrow, .. }
+            | State::Resolved { ref escrow, .. }
+            | State::Settled { ref escrow, .. }
+            | State::Rescinded { ref escrow, .. } => Some(escrow),
+            State::Draft => None,
         }
     }
 
-    /// The party that took the quest on, or `None` while nobody has.
+    /// The party currently working the quest, or `None` when nobody is.
     #[must_use]
     pub fn party(&self) -> Option<&Party> {
         match self.state {
-            State::Accepted { ref party, .. } => Some(party),
-            State::Draft { .. }
-            | State::Posted { .. }
-            | State::InProgress
-            | State::Resolved
-            | State::Abandoned
-            | State::Settled => None,
+            State::Accepted { ref party, .. }
+            | State::InProgress { ref party, .. }
+            | State::Resolved { ref party, .. }
+            | State::Settled { ref party, .. } => Some(party),
+            State::Draft | State::Posted { .. } | State::Rescinded { .. } => None,
         }
     }
 
@@ -272,23 +288,16 @@ impl Quest {
     /// Guild has promised to somebody else.
     pub fn post(&mut self, escrow: Escrow) -> Result<(), QuestError> {
         match self.state {
-            State::Draft {
-                client,
-                hazard_tier,
-            } => {
-                self.state = State::Posted {
-                    escrow,
-                    client,
-                    hazard_tier,
-                };
+            State::Draft => {
+                self.state = State::Posted { escrow };
                 Ok(())
             }
             State::Posted { .. }
             | State::Accepted { .. }
-            | State::InProgress
-            | State::Resolved
-            | State::Abandoned
-            | State::Settled => Err(QuestError::IllegalTransition {
+            | State::InProgress { .. }
+            | State::Resolved { .. }
+            | State::Rescinded { .. }
+            | State::Settled { .. } => Err(QuestError::IllegalTransition {
                 from: self.stage(),
                 to: Stage::Posted,
             }),
@@ -303,29 +312,29 @@ impl Quest {
     /// a quest on the board is on offer, and one already accepted belongs to
     /// the party that got there first.
     pub fn accept(&mut self, party: Party) -> Result<(), QuestError> {
-        match &self.state {
-            State::Posted {
-                escrow,
-                client,
-                hazard_tier,
-            } => {
-                self.state = State::Accepted {
-                    escrow: escrow.clone(),
-                    client: *client,
-                    hazard_tier: *hazard_tier,
-                    party,
-                };
+        // The escrow is handed to the next state, not copied into it, so the
+        // old state has to be owned here. `Draft` stands in for the moment
+        // between taking it and writing the new state back; nothing runs in
+        // that window, and the refused arm restores the original untouched.
+        let original = core::mem::replace(&mut self.state, State::Draft);
+        match original {
+            State::Posted { escrow } => {
+                self.state = State::Accepted { escrow, party };
                 Ok(())
             }
-            State::Draft { .. }
+            State::Draft
             | State::Accepted { .. }
-            | State::InProgress
-            | State::Resolved
-            | State::Abandoned
-            | State::Settled => Err(QuestError::IllegalTransition {
-                from: self.stage(),
-                to: Stage::Accepted,
-            }),
+            | State::InProgress { .. }
+            | State::Resolved { .. }
+            | State::Rescinded { .. }
+            | State::Settled { .. } => {
+                let from = original.stage();
+                self.state = original;
+                Err(QuestError::IllegalTransition {
+                    from,
+                    to: Stage::Accepted,
+                })
+            }
         }
     }
 
@@ -336,20 +345,25 @@ impl Quest {
     /// [`QuestError::IllegalTransition`] from any state but `Accepted` —
     /// there is no party to set out until one has taken the quest.
     pub fn begin(&mut self) -> Result<(), QuestError> {
-        match self.state {
-            State::Accepted { .. } => {
-                self.state = State::InProgress;
+        let original = core::mem::replace(&mut self.state, State::Draft);
+        match original {
+            State::Accepted { escrow, party } => {
+                self.state = State::InProgress { escrow, party };
                 Ok(())
             }
-            State::Draft { .. }
+            State::Draft
             | State::Posted { .. }
-            | State::InProgress
-            | State::Resolved
-            | State::Abandoned
-            | State::Settled => Err(QuestError::IllegalTransition {
-                from: self.stage(),
-                to: Stage::InProgress,
-            }),
+            | State::InProgress { .. }
+            | State::Resolved { .. }
+            | State::Rescinded { .. }
+            | State::Settled { .. } => {
+                let from = original.stage();
+                self.state = original;
+                Err(QuestError::IllegalTransition {
+                    from,
+                    to: Stage::InProgress,
+                })
+            }
         }
     }
 
@@ -359,21 +373,30 @@ impl Quest {
     ///
     /// [`QuestError::IllegalTransition`] from any state but `InProgress` —
     /// work that never started cannot have finished.
-    pub fn resolve(&mut self) -> Result<(), QuestError> {
-        match self.state {
-            State::InProgress => {
-                self.state = State::Resolved;
+    pub fn resolve(&mut self, outcome: Outcome) -> Result<(), QuestError> {
+        let original = core::mem::replace(&mut self.state, State::Draft);
+        match original {
+            State::InProgress { escrow, party } => {
+                self.state = State::Resolved {
+                    escrow,
+                    party,
+                    outcome,
+                };
                 Ok(())
             }
-            State::Draft { .. }
+            State::Draft
             | State::Posted { .. }
             | State::Accepted { .. }
-            | State::Resolved
-            | State::Abandoned
-            | State::Settled => Err(QuestError::IllegalTransition {
-                from: self.stage(),
-                to: Stage::Resolved,
-            }),
+            | State::Resolved { .. }
+            | State::Rescinded { .. }
+            | State::Settled { .. } => {
+                let from = original.stage();
+                self.state = original;
+                Err(QuestError::IllegalTransition {
+                    from,
+                    to: Stage::Resolved,
+                })
+            }
         }
     }
 
@@ -385,46 +408,100 @@ impl Quest {
     /// settling twice would pay the bounty twice, and settling early would pay
     /// for work that has not ended.
     pub fn settle(&mut self) -> Result<(), QuestError> {
-        match self.state {
-            State::Resolved => {
-                self.state = State::Settled;
+        let original = core::mem::replace(&mut self.state, State::Draft);
+        match original {
+            State::Resolved {
+                escrow,
+                party,
+                outcome,
+            } => {
+                self.state = State::Settled {
+                    escrow,
+                    party,
+                    outcome,
+                };
                 Ok(())
             }
-            State::Draft { .. }
+            State::Draft
             | State::Posted { .. }
             | State::Accepted { .. }
-            | State::InProgress
-            | State::Abandoned
-            | State::Settled => Err(QuestError::IllegalTransition {
-                from: self.stage(),
-                to: Stage::Settled,
-            }),
+            | State::InProgress { .. }
+            | State::Rescinded { .. }
+            | State::Settled { .. } => {
+                let from = original.stage();
+                self.state = original;
+                Err(QuestError::IllegalTransition {
+                    from,
+                    to: Stage::Settled,
+                })
+            }
         }
     }
 
-    /// Gives the quest up, before anyone resolved it.
+    /// Gives up the party's engagement, putting the quest back on the board.
+    ///
+    /// The escrow stays with the quest — the client still wants the work done,
+    /// and another party may take it on. Ending the quest outright is
+    /// [`rescind`](Quest::rescind), and only the client may do that.
     ///
     /// # Errors
     ///
-    /// [`QuestError::IllegalTransition`] from `Draft` and `Posted`, where no
-    /// party has taken the quest on and so none can walk away from it, and
-    /// from `Resolved`, `Settled` or `Abandoned`, where it has already reached
-    /// its end. See the [module docs](self) for why the window opens at
-    /// `Accepted`.
+    /// [`QuestError::IllegalTransition`] from any state where no party is
+    /// engaged: there is nothing to walk away from.
     pub fn abandon(&mut self) -> Result<(), QuestError> {
-        match self.state {
-            State::Accepted { .. } | State::InProgress => {
-                self.state = State::Abandoned;
+        let original = core::mem::replace(&mut self.state, State::Draft);
+        match original {
+            State::Accepted { escrow, .. } | State::InProgress { escrow, .. } => {
+                self.state = State::Posted { escrow };
                 Ok(())
             }
-            State::Posted { .. }
-            | State::Draft { .. }
-            | State::Resolved
-            | State::Abandoned
-            | State::Settled => Err(QuestError::IllegalTransition {
-                from: self.stage(),
-                to: Stage::Abandoned,
-            }),
+            State::Draft
+            | State::Posted { .. }
+            | State::Resolved { .. }
+            | State::Rescinded { .. }
+            | State::Settled { .. } => {
+                let from = original.stage();
+                self.state = original;
+                Err(QuestError::IllegalTransition {
+                    from,
+                    to: Stage::Posted,
+                })
+            }
+        }
+    }
+
+    /// Withdraws the quest from the board on the client's behalf.
+    ///
+    /// Legal only while nobody has taken it on. Once a party is engaged the
+    /// client is committed: they cannot cancel work already begun, so the
+    /// question of compensating a party mid-quest never arises.
+    ///
+    /// The escrow rides into `Rescinded` so it can be refunded; rescinding does
+    /// not itself move the coin.
+    ///
+    /// # Errors
+    ///
+    /// [`QuestError::IllegalTransition`] from any state but `Posted`.
+    pub fn rescind(&mut self) -> Result<(), QuestError> {
+        let original = core::mem::replace(&mut self.state, State::Draft);
+        match original {
+            State::Posted { escrow } => {
+                self.state = State::Rescinded { escrow };
+                Ok(())
+            }
+            State::Draft
+            | State::Accepted { .. }
+            | State::InProgress { .. }
+            | State::Resolved { .. }
+            | State::Rescinded { .. }
+            | State::Settled { .. } => {
+                let from = original.stage();
+                self.state = original;
+                Err(QuestError::IllegalTransition {
+                    from,
+                    to: Stage::Rescinded,
+                })
+            }
         }
     }
 }
@@ -475,7 +552,7 @@ mod tests {
     fn resolved() -> Quest {
         let mut quest = in_progress();
         quest
-            .resolve()
+            .resolve(Outcome::Successful)
             .expect("a quest in progress can be resolved");
         quest
     }
@@ -486,9 +563,9 @@ mod tests {
         quest
     }
 
-    fn abandoned() -> Quest {
-        let mut quest = accepted();
-        quest.abandon().expect("an accepted quest can be abandoned");
+    fn rescinded() -> Quest {
+        let mut quest = posted();
+        quest.rescind().expect("a posted quest can be rescinded");
         quest
     }
 
@@ -529,8 +606,7 @@ mod tests {
     fn should_refuse_to_post_a_settled_quest() {
         let mut quest = settled();
 
-        let escrow = Escrow::unfunded();
-        let moved = quest.post(escrow.clone());
+        let moved = quest.post(Escrow::unfunded());
 
         assert_eq!(moved, refused(Stage::Settled, Stage::Posted));
     }
@@ -594,7 +670,7 @@ mod tests {
     fn should_resolve_a_quest_in_progress() {
         let mut quest = in_progress();
 
-        let moved = quest.resolve();
+        let moved = quest.resolve(Outcome::Successful);
 
         assert_eq!(moved, Ok(()));
         assert_eq!(quest.stage(), Stage::Resolved);
@@ -604,7 +680,7 @@ mod tests {
     fn should_refuse_to_resolve_work_that_never_started() {
         let mut quest = accepted();
 
-        let moved = quest.resolve();
+        let moved = quest.resolve(Outcome::Successful);
 
         assert_eq!(moved, refused(Stage::Accepted, Stage::Resolved));
     }
@@ -640,26 +716,45 @@ mod tests {
         assert_eq!(moved, refused(Stage::Settled, Stage::Settled));
     }
 
-    // Abandonment.
+    // Abandonment: the engagement ends, the quest does not.
 
+    /// The escrow stays with the quest — nothing is refunded, because the
+    /// client still wants the work done.
     #[test]
-    fn should_abandon_an_accepted_quest() {
+    fn should_put_an_abandoned_quest_back_on_the_board() {
         let mut quest = accepted();
 
         let moved = quest.abandon();
 
         assert_eq!(moved, Ok(()));
-        assert_eq!(quest.stage(), Stage::Abandoned);
+        assert_eq!(quest.stage(), Stage::Posted);
+        assert_eq!(quest.bounty(), Some(&Escrow::unfunded()));
+        assert_eq!(quest.party(), None);
     }
 
     #[test]
-    fn should_abandon_a_quest_in_progress() {
+    fn should_put_a_quest_abandoned_mid_flight_back_on_the_board() {
         let mut quest = in_progress();
 
         let moved = quest.abandon();
 
         assert_eq!(moved, Ok(()));
-        assert_eq!(quest.stage(), Stage::Abandoned);
+        assert_eq!(quest.stage(), Stage::Posted);
+        assert_eq!(quest.bounty(), Some(&Escrow::unfunded()));
+    }
+
+    /// A quest may be attempted any number of times; only the party that
+    /// finishes it is paid.
+    #[test]
+    fn should_let_a_second_party_take_on_what_the_first_gave_up() {
+        let mut quest = in_progress();
+        quest.abandon().expect("a party may walk away");
+
+        quest.accept(Party).expect("a second party may take it on");
+        quest.begin().expect("and set out");
+
+        assert_eq!(quest.stage(), Stage::InProgress);
+        assert_eq!(quest.bounty(), Some(&Escrow::unfunded()));
     }
 
     #[test]
@@ -668,18 +763,17 @@ mod tests {
 
         let moved = quest.abandon();
 
-        assert_eq!(moved, refused(Stage::Draft, Stage::Abandoned));
+        assert_eq!(moved, refused(Stage::Draft, Stage::Posted));
     }
 
     /// Nobody has taken a posted quest on, so nobody can walk away from it.
-    /// Pulling it off the board is a different act, not modelled here yet.
     #[test]
     fn should_refuse_to_abandon_a_quest_no_party_has_taken() {
         let mut quest = posted();
 
         let moved = quest.abandon();
 
-        assert_eq!(moved, refused(Stage::Posted, Stage::Abandoned));
+        assert_eq!(moved, refused(Stage::Posted, Stage::Posted));
     }
 
     #[test]
@@ -688,16 +782,66 @@ mod tests {
 
         let moved = quest.abandon();
 
-        assert_eq!(moved, refused(Stage::Resolved, Stage::Abandoned));
+        assert_eq!(moved, refused(Stage::Resolved, Stage::Posted));
+    }
+
+    // Rescinding: only the client, and only before anyone takes it on.
+
+    #[test]
+    fn should_rescind_a_posted_quest() {
+        let mut quest = posted();
+
+        let moved = quest.rescind();
+
+        assert_eq!(moved, Ok(()));
+        assert_eq!(quest.stage(), Stage::Rescinded);
+    }
+
+    /// The escrow rides into `Rescinded` so the bounty can be refunded.
+    #[test]
+    fn should_keep_the_escrow_when_rescinded_so_it_can_be_refunded() {
+        let quest = rescinded();
+
+        assert_eq!(quest.bounty(), Some(&Escrow::unfunded()));
+        assert_eq!(quest.party(), None);
     }
 
     #[test]
-    fn should_refuse_to_abandon_a_quest_twice() {
-        let mut quest = abandoned();
+    fn should_refuse_to_rescind_a_draft_that_was_never_posted() {
+        let mut quest = Quest::new(Client, HazardTier::Errand);
 
-        let moved = quest.abandon();
+        let moved = quest.rescind();
 
-        assert_eq!(moved, refused(Stage::Abandoned, Stage::Abandoned));
+        assert_eq!(moved, refused(Stage::Draft, Stage::Rescinded));
+    }
+
+    /// Once a party is engaged the client is committed — they cannot cancel
+    /// work already begun.
+    #[test]
+    fn should_refuse_to_rescind_a_quest_a_party_has_taken() {
+        let mut quest = accepted();
+
+        let moved = quest.rescind();
+
+        assert_eq!(moved, refused(Stage::Accepted, Stage::Rescinded));
+    }
+
+    #[test]
+    fn should_refuse_to_rescind_a_quest_in_progress() {
+        let mut quest = in_progress();
+
+        let moved = quest.rescind();
+
+        assert_eq!(moved, refused(Stage::InProgress, Stage::Rescinded));
+    }
+
+    #[test]
+    fn should_refuse_to_rescind_a_quest_twice() {
+        let mut quest = rescinded();
+
+        let moved = quest.rescind();
+
+        assert_eq!(moved, refused(Stage::Rescinded, Stage::Rescinded));
     }
 
     // A refused move must leave the quest exactly as it found it.
@@ -707,7 +851,7 @@ mod tests {
         let mut quest = accepted();
 
         let _ = quest.post(Escrow::unfunded());
-        let _ = quest.resolve();
+        let _ = quest.resolve(Outcome::Successful);
         let _ = quest.settle();
 
         assert_eq!(quest.stage(), Stage::Accepted);
@@ -724,23 +868,25 @@ mod tests {
         assert!(quest.post(Escrow::unfunded()).is_err());
         assert!(quest.accept(Party).is_err());
         assert!(quest.begin().is_err());
-        assert!(quest.resolve().is_err());
+        assert!(quest.resolve(Outcome::Successful).is_err());
         assert!(quest.settle().is_err());
         assert!(quest.abandon().is_err());
+        assert!(quest.rescind().is_err());
         assert_eq!(quest.stage(), Stage::Settled);
     }
 
     #[test]
-    fn should_refuse_every_move_out_of_an_abandoned_quest() {
-        let mut quest = abandoned();
+    fn should_refuse_every_move_out_of_a_rescinded_quest() {
+        let mut quest = rescinded();
 
         assert!(quest.post(Escrow::unfunded()).is_err());
         assert!(quest.accept(Party).is_err());
         assert!(quest.begin().is_err());
-        assert!(quest.resolve().is_err());
+        assert!(quest.resolve(Outcome::Successful).is_err());
         assert!(quest.settle().is_err());
         assert!(quest.abandon().is_err());
-        assert_eq!(quest.stage(), Stage::Abandoned);
+        assert!(quest.rescind().is_err());
+        assert_eq!(quest.stage(), Stage::Rescinded);
     }
 
     // The whole road.
@@ -755,7 +901,7 @@ mod tests {
         quest.accept(Party).expect("a posted quest can be accepted");
         quest.begin().expect("an accepted quest can begin");
         quest
-            .resolve()
+            .resolve(Outcome::Successful)
             .expect("a quest in progress can be resolved");
         quest.settle().expect("a resolved quest can be settled");
 
@@ -764,25 +910,38 @@ mod tests {
 
     // What the quest carries, and when it does not.
 
-    /// A draft has taken no coin yet, and from `InProgress` onward the state
-    /// carries none — see the note on the aggregate in the module docs.
+    /// Posting places the escrow, and every state after it keeps the same one
+    /// — the bounty must still be reachable at settlement, which is when it is
+    /// paid out.
     #[test]
-    fn should_hold_no_bounty_before_it_is_posted_or_after_it_ends() {
+    fn should_keep_the_escrow_from_posting_through_to_settlement() {
+        assert_eq!(posted().bounty(), Some(&Escrow::unfunded()));
+        assert_eq!(accepted().bounty(), Some(&Escrow::unfunded()));
+        assert_eq!(in_progress().bounty(), Some(&Escrow::unfunded()));
+        assert_eq!(resolved().bounty(), Some(&Escrow::unfunded()));
+        assert_eq!(settled().bounty(), Some(&Escrow::unfunded()));
+    }
+
+    #[test]
+    fn should_hold_no_escrow_before_one_is_placed() {
         assert_eq!(Quest::new(Client, HazardTier::Errand).bounty(), None);
-        assert_eq!(in_progress().bounty(), None);
-        assert_eq!(resolved().bounty(), None);
-        assert_eq!(abandoned().bounty(), None);
-        assert_eq!(settled().bounty(), None);
+    }
+
+    /// M4 splits the bounty among the party, so the quest has to still name
+    /// them when it settles.
+    #[test]
+    fn should_keep_the_party_from_acceptance_through_to_settlement() {
+        assert_eq!(accepted().party(), Some(&Party));
+        assert_eq!(in_progress().party(), Some(&Party));
+        assert_eq!(resolved().party(), Some(&Party));
+        assert_eq!(settled().party(), Some(&Party));
     }
 
     #[test]
     fn should_name_no_party_until_one_takes_it() {
         assert_eq!(Quest::new(Client, HazardTier::Errand).party(), None);
         assert_eq!(posted().party(), None);
-        assert_eq!(in_progress().party(), None);
-        assert_eq!(resolved().party(), None);
-        assert_eq!(abandoned().party(), None);
-        assert_eq!(settled().party(), None);
+        assert_eq!(rescinded().party(), None);
     }
 
     // How they read.
@@ -794,7 +953,7 @@ mod tests {
         assert_eq!(Stage::Accepted.to_string(), "accepted");
         assert_eq!(Stage::InProgress.to_string(), "in progress");
         assert_eq!(Stage::Resolved.to_string(), "resolved");
-        assert_eq!(Stage::Abandoned.to_string(), "abandoned");
+        assert_eq!(Stage::Rescinded.to_string(), "rescinded");
         assert_eq!(Stage::Settled.to_string(), "settled");
     }
 
@@ -803,37 +962,55 @@ mod tests {
     /// holding an escrow and a party — deliberate or not, this pins it.
     #[test]
     fn should_render_a_state_together_with_what_it_holds() {
-        assert_eq!(
-            State::Draft {
-                client: Client,
-                hazard_tier: HazardTier::Errand
-            }
-            .to_string(),
-            "a draft of a quest commissioned by the client"
-        );
+        assert_eq!(State::Draft.to_string(), "a draft");
         assert_eq!(
             State::Posted {
                 escrow: Escrow::unfunded(),
-                hazard_tier: HazardTier::Errand,
-                client: Client
             }
             .to_string(),
-            "posted backed by unfunded escrow and commissioned by the client"
+            "posted backed by unfunded escrow"
         );
         assert_eq!(
             State::Accepted {
                 escrow: Escrow::unfunded(),
-                hazard_tier: HazardTier::Errand,
                 party: Party,
-                client: Client,
             }
             .to_string(),
             "accepted"
         );
-        assert_eq!(State::InProgress.to_string(), "in progress");
-        assert_eq!(State::Resolved.to_string(), "resolved");
-        assert_eq!(State::Abandoned.to_string(), "abandoned");
-        assert_eq!(State::Settled.to_string(), "settled");
+        assert_eq!(
+            State::InProgress {
+                escrow: Escrow::unfunded(),
+                party: Party
+            }
+            .to_string(),
+            "in progress"
+        );
+        assert_eq!(
+            State::Resolved {
+                escrow: Escrow::unfunded(),
+                party: Party,
+                outcome: Outcome::Successful
+            }
+            .to_string(),
+            "resolved"
+        );
+        assert_eq!(
+            State::Rescinded {
+                escrow: Escrow::unfunded()
+            }
+            .to_string(),
+            "rescinded, still holding unfunded escrow"
+        );
+        assert_eq!(
+            State::Settled {
+                escrow: Escrow::unfunded(),
+                party: Party,
+                outcome: Outcome::Successful
+            }
+            .to_string(),
+            "settled"
+        );
     }
 
     #[test]

@@ -82,7 +82,7 @@ use std::fmt::Display;
 use crate::money::{Coin, MoneyError};
 
 /// Funds the Guild holds against a quest, from the patron's payment to the party's payout.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Debug, PartialEq, Eq, Hash)]
 pub struct Escrow {
     state: State,
 }
